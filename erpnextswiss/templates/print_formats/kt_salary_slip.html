@@ -12,18 +12,25 @@
 {% set payable = doc.net_pay if rounding_disabled or doc.rounded_total is none else doc.rounded_total %}
 {% set labels = {'Basic': 'Monatslohn', 'AHV/IV/EO Arbeitnehmer': 'AHV / IV / EO', 'ALV Arbeitnehmer': 'Arbeitslosenversicherung (ALV)', 'BVG Arbeitnehmer': 'Pensionskasse (BVG)', 'UVG NBU Arbeitnehmer': 'Nichtberufsunfallversicherung (NBU)', 'KTG Arbeitnehmer': 'Krankentaggeldversicherung (KTG)'} %}
 {% set attendance = frappe.get_list('Attendance', filters={'employee': doc.employee, 'docstatus': 1, 'attendance_date': ['between', [attendance_start, period_end]]}, fields=['attendance_date', 'status', 'leave_type', 'half_day_status', 'overtime_type', 'actual_overtime_duration']) %}
-{% set time_totals = namespace(vacation_period=0, vacation_ytd=0, overtime_period=0, overtime_ytd=0) %}
+{% set time_totals = namespace(vacation_period=0, vacation_ytd=0, overtime_period=0, overtime_ytd=0, attendance_period=0, attendance_ytd=0) %}
 {% for entry in attendance %}
   {% set entry_date = frappe.utils.getdate(entry.attendance_date) %}
   {% set entry_overtime = entry.actual_overtime_duration or 0 %}
-  {% if entry.status in ['On Leave', 'Half Day'] and entry.leave_type == 'Ferien' %}
-    {% set leave_days = 0.5 if entry.status == 'Half Day' else 1 %}
-    {% set time_totals.vacation_ytd = time_totals.vacation_ytd + leave_days %}
-    {% if entry_date >= period_start %}{% set time_totals.vacation_period = time_totals.vacation_period + leave_days %}{% endif %}
+  {% if entry_date >= year_start %}
+    {% set time_totals.attendance_ytd = time_totals.attendance_ytd + 1 %}
+    {% if entry.status in ['On Leave', 'Half Day'] and entry.leave_type == 'Ferien' %}
+      {% set leave_days = 0.5 if entry.status == 'Half Day' else 1 %}
+      {% set time_totals.vacation_ytd = time_totals.vacation_ytd + leave_days %}
+    {% endif %}
+    {% if entry.status == 'Present' and entry.overtime_type %}{% set time_totals.overtime_ytd = time_totals.overtime_ytd + entry_overtime %}{% endif %}
   {% endif %}
-  {% if entry.status == 'Present' and entry.overtime_type %}
-    {% set time_totals.overtime_ytd = time_totals.overtime_ytd + entry_overtime %}
-    {% if entry_date >= period_start %}{% set time_totals.overtime_period = time_totals.overtime_period + entry_overtime %}{% endif %}
+  {% if entry_date >= period_start %}
+    {% set time_totals.attendance_period = time_totals.attendance_period + 1 %}
+    {% if entry.status in ['On Leave', 'Half Day'] and entry.leave_type == 'Ferien' %}
+      {% set leave_days = 0.5 if entry.status == 'Half Day' else 1 %}
+      {% set time_totals.vacation_period = time_totals.vacation_period + leave_days %}
+    {% endif %}
+    {% if entry.status == 'Present' and entry.overtime_type %}{% set time_totals.overtime_period = time_totals.overtime_period + entry_overtime %}{% endif %}
   {% endif %}
 {% endfor %}
 {% macro money(value) -%}{{ "{:,.2f}".format(value or 0).replace(',', "'") }}{%- endmacro %}
@@ -108,10 +115,10 @@
     <td><table class="meta"><tr><td>Personal-Nr.</td><td>{{ doc.employee|e }}</td></tr><tr><td>Zeitraum</td><td>{{ date(doc.start_date) }} - {{ date(doc.end_date) }}</td></tr><tr><td>Belegdatum</td><td>{{ date(doc.posting_date) }}</td></tr></table></td>
   </tr></table>
   <table class="time-summary" aria-label="Ferien und Arbeitszeit"><tr>
-    <td><div class="time-label">Ferien bezogen · Lohnperiode</div><div class="time-value">{{ quantity(time_totals.vacation_period) }} Tage</div></td>
-    <td><div class="time-label">Ferien bezogen · seit 1. Januar {{ period_end.year }}</div><div class="time-value">{{ quantity(time_totals.vacation_ytd) }} Tage</div></td>
-    <td><div class="time-label">Erfasste Überstunden · Lohnperiode</div><div class="time-value">{{ quantity(time_totals.overtime_period) }} Std.</div></td>
-    <td><div class="time-label">Erfasste Überstunden · seit 1. Januar {{ period_end.year }}</div><div class="time-value">{{ quantity(time_totals.overtime_ytd) }} Std.</div></td>
+    <td><div class="time-label">Ferien bezogen · Lohnperiode</div><div class="time-value">{% if time_totals.attendance_period %}{{ quantity(time_totals.vacation_period) }} Tage{% else %}Nicht erfasst{% endif %}</div></td>
+    <td><div class="time-label">Ferien bezogen · seit 1. Januar {{ period_end.year }}</div><div class="time-value">{% if time_totals.attendance_ytd %}{{ quantity(time_totals.vacation_ytd) }} Tage{% else %}Nicht erfasst{% endif %}</div></td>
+    <td><div class="time-label">Erfasste Überstunden · Lohnperiode</div><div class="time-value">{% if time_totals.attendance_period %}{{ quantity(time_totals.overtime_period) }} Std.{% else %}Nicht erfasst{% endif %}</div></td>
+    <td><div class="time-label">Erfasste Überstunden · seit 1. Januar {{ period_end.year }}</div><div class="time-value">{% if time_totals.attendance_ytd %}{{ quantity(time_totals.overtime_ytd) }} Std.{% else %}Nicht erfasst{% endif %}</div></td>
   </tr></table>
   <table class="ledger">
     <thead><tr><th style="width:64%">Lohnbestandteil</th><th class="num" style="width:18%">Bezüge {{ currency|e }}</th><th class="num" style="width:18%">Abzüge {{ currency|e }}</th></tr></thead>

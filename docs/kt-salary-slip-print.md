@@ -30,8 +30,10 @@ HTML is the source of truth; edit it in Git, not the generated database record.
   slip end date. Ferien is limited to the `Ferien` leave type; half-days count
   as 0.5. Overtime is the saved `actual_overtime_duration` in hours for
   submitted Present attendance with an overtime type, matching HRMS's source
-  records. These are not leave balances, overtime pay, or proof of payment; no
-  attendance or salary records are created or amended by printing.
+  records. If no submitted Attendance exists in a period, the summary says
+  `Nicht erfasst` instead of implying zero. These are not leave balances,
+  overtime pay, or proof of payment; no attendance or salary records are
+  created or amended by printing.
 
 The hierarchy is inspired by the public Abacus salary example (layout only, not
 its 2018 rates): https://media.abacus.ch/abs/offertstandards/de/finanzprogramme/5-2-3.pdf
