@@ -11,7 +11,7 @@
 {% set rounding_disabled = frappe.db.get_single_value('Payroll Settings', 'disable_rounded_total') %}
 {% set payable = doc.net_pay if rounding_disabled or doc.rounded_total is none else doc.rounded_total %}
 {% set labels = {'Basic': 'Monatslohn', 'AHV/IV/EO Arbeitnehmer': 'AHV / IV / EO', 'ALV Arbeitnehmer': 'Arbeitslosenversicherung (ALV)', 'BVG Arbeitnehmer': 'Pensionskasse (BVG)', 'UVG NBU Arbeitnehmer': 'Nichtberufsunfallversicherung (NBU)', 'KTG Arbeitnehmer': 'Krankentaggeldversicherung (KTG)'} %}
-{% set attendance = frappe.get_all('Attendance', filters={'employee': doc.employee, 'docstatus': 1, 'attendance_date': ['between', [attendance_start, period_end]]}, fields=['attendance_date', 'status', 'leave_type', 'half_day_status', 'overtime_type', 'actual_overtime_duration']) %}
+{% set attendance = frappe.get_list('Attendance', filters={'employee': doc.employee, 'docstatus': 1, 'attendance_date': ['between', [attendance_start, period_end]]}, fields=['attendance_date', 'status', 'leave_type', 'half_day_status', 'overtime_type', 'actual_overtime_duration']) %}
 {% set time_totals = namespace(vacation_period=0, vacation_ytd=0, overtime_period=0, overtime_ytd=0) %}
 {% for entry in attendance %}
   {% set entry_date = frappe.utils.getdate(entry.attendance_date) %}
