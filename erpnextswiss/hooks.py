@@ -18,8 +18,21 @@ add_to_apps_screen = [
         "name": "erpnextswiss",
         "logo": "/assets/erpnextswiss/images/schweizer_buchhaltung.svg",
         "title": "Schweizer Buchhaltung",
-        "route": "schweizer-buchhaltung",
+        "route": app_home,
     }
+]
+
+website_redirects = [
+    {
+        "source": "/schweizer-buchhaltung",
+        "target": app_home,
+        "forward_query_parameters": True,
+    },
+    {
+        "source": "/erpnextswiss",
+        "target": app_home,
+        "forward_query_parameters": True,
+    },
 ]
 
 # Includes in <head>
