@@ -15,6 +15,7 @@ from erpnextswiss.erpnextswiss.iso20022 import (
     is_qr_iban,
     is_valid_qr_reference,
     resolve_invoice_payment_details,
+    creditor_agent_bic,
 )
 from erpnextswiss.erpnextswiss.xml import validate_xml_against_xsd
 import html          # used to escape xml content
@@ -524,6 +525,11 @@ class PaymentProposal(Document):
                 payment_record['iban'] = payment.iban.replace(" ", "")
                 payment_record['reference'] = payment.reference
                 payment_record['bic'] = (payment.bic or "").replace(" ", "")
+            # Business validation is required even when optional XSD validation is off.
+            try:
+                payment_record['creditor_agent_bic'] = creditor_agent_bic(payment_record, data['xml_region'])
+            except ValueError:
+                frappe.throw(_("Payment {0}: a valid creditor-bank BIC is required for a non-SEPA cross-border payment.").format(payment.idx))
             # once the payment is extracted for payment, submit the record
             transaction_count += 1
             control_sum += round(payment.amount, 2)

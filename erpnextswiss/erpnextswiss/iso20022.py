@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import secrets
+import re
 
 
 def create_message_id(now=None, entropy=None):
@@ -16,6 +17,23 @@ def create_payment_file_name(message_id):
 
 def normalize_iban(iban):
     return "".join((iban or "").split()).upper()
+
+
+def creditor_agent_bic(payment, region):
+    """Identify the bank for Swiss cross-border, non-SEPA IBAN transfers.
+
+    EUR alone does not make a transfer SEPA. SPS payment type X (foreign)
+    needs a creditor agent in every currency. This exporter supports its
+    BIC identification, not the alternative bank-name/address route.
+    Domestic CH/LI and SEPA transfers retain IBAN-only routing.
+    """
+    if (region != "CH" or payment.get("service_level") != "IBAN"
+            or normalize_iban(payment.get("iban"))[:2] in ("CH", "LI")):
+        return None
+    bic = "".join((payment.get("bic") or "").split()).upper()
+    if not re.fullmatch(r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?", bic):
+        raise ValueError("A valid creditor-bank BIC is required for a non-SEPA cross-border payment.")
+    return bic
 
 
 def is_qr_iban(iban):
