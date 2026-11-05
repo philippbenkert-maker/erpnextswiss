@@ -140,9 +140,11 @@ def test_actual_generation_checks_before_render_even_without_xsd(xsd_enabled, va
     generate = scope["create_bank_file"]
     context = nullcontext()
     if os.environ.get("KT_TEST_NATIVE_PAYMENT_IMPORT") == "1":
-        from erpnextswiss.erpnextswiss.doctype.payment_proposal.payment_proposal import PaymentProposal
-        generate = PaymentProposal.create_bank_file
-        context = patch.dict(generate.__globals__, scope)
+        from erpnextswiss.erpnextswiss.doctype.payment_proposal import payment_proposal as native
+        generate = native.PaymentProposal.create_bank_file
+        # Frappe wraps methods for argument validation; patch the implementation
+        # module, not the wrapper's globals, while retaining the actual wrapper.
+        context = patch.dict(vars(native), scope)
     with context:
         if valid_bank:
             assert generate(proposal)["content"] == "TEST-XML"
