@@ -733,6 +733,103 @@ class TestEbicsAutomation(TestCase):
         with patch.object(automation.frappe, 'get_all', return_value=[]):
             self.assertFalse(automation._already_booked_entry(MagicMock(), statement, entry))
 
+    def test_cross_export_reference_resolves_exactly_one_paid_purchase_invoice(self):
+        cases = [
+            ('1592469660', 'K 1 180 533 / RNUH', 'Kantonales Steueramt Aargau', '63.60'),
+            ('1592469678', '11794472', 'Coop Pronto AG', '184.85'),
+        ]
+        for identity, invoice_reference, supplier, amount in cases:
+            with self.subTest(identity=identity):
+                statement = {'account': 'BANK', 'currency': 'CHF', 'iban': 'CH1'}
+                entry = {
+                    'issues': [], 'detail_count': 1, 'amount': amount, 'credit_debit': 'DBIT',
+                    'booking_date': '2026-11-02', 'reference': f'O/{identity}',
+                    'entry_reference': None, 'bank_detail_references': [],
+                    'candidates': [{
+                        'amount': float(amount), 'currency': 'CHF', 'credit_debit': 'DBIT',
+                        'date': '2026-11-02', 'party_match': supplier,
+                        'transaction_reference': invoice_reference,
+                        'unique_reference': f'O/{identity}-1', 'invoice_matches': None,
+                        'matched_amount': 0,
+                    }],
+                }
+                row = frappe._dict(
+                    name=f'ACC-PAY-{identity}', paid_amount=amount, received_amount=amount,
+                    paid_from_account_currency='CHF', paid_to_account_currency='CHF',
+                    party_type='Supplier', party=supplier,
+                    remarks=f'Zahlung via E-Banking {identity}; {invoice_reference}')
+                payment = frappe._dict(row)
+                payment.update(docstatus=1, company='KT Wärmesysteme AG', payment_type='Pay',
+                    paid_from='BANK', posting_date='2026-11-02', references=[frappe._dict(
+                    reference_doctype='Purchase Invoice', reference_name=f'PINV-{identity}',
+                    allocated_amount=amount)])
+                invoice = frappe._dict(
+                    name=f'PINV-{identity}', docstatus=1, company='KT Wärmesysteme AG',
+                    supplier=supplier, currency='CHF', outstanding_amount=0,
+                    bill_no=invoice_reference, esr_reference=None,
+                    esr_reference_number=None, reference_number_full=None)
+
+                def get_doc(doctype, name):
+                    return payment if doctype == 'Payment Entry' else invoice
+
+                with (patch.object(automation.frappe, 'get_all', side_effect=[[], [row]]),
+                      patch.object(automation.frappe, 'get_doc', side_effect=get_doc)):
+                    self.assertTrue(automation._already_booked_entry(
+                        MagicMock(company='KT Wärmesysteme AG'), statement, entry))
+
+    def test_cross_export_match_fails_closed_without_labelled_identity_or_paid_invoice(self):
+        statement = {'account': 'BANK', 'currency': 'CHF', 'iban': 'CH1'}
+        entry = {
+            'issues': [], 'detail_count': 1, 'amount': '63.60', 'credit_debit': 'DBIT',
+            'booking_date': '2026-11-02', 'reference': 'O/1592469660',
+            'entry_reference': None, 'candidates': [{
+                'amount': 63.60, 'currency': 'CHF', 'credit_debit': 'DBIT',
+                'date': '2026-11-02', 'party_match': 'Kantonales Steueramt Aargau',
+                'transaction_reference': 'K 1 180 533 / RNUH',
+            }],
+        }
+        row = frappe._dict(
+            name='ACC-PAY-2026-00070', paid_amount=63.60, received_amount=63.60,
+            paid_from_account_currency='CHF', paid_to_account_currency='CHF',
+            party_type='Supplier', party='Kantonales Steueramt Aargau',
+            remarks='Eine andere Nummer 1592469660')
+        with patch.object(automation.frappe, 'get_all', side_effect=[[], [row]]):
+            self.assertFalse(automation._already_booked_entry(
+                MagicMock(company='KT Wärmesysteme AG'), statement, entry))
+
+        row.remarks = 'E-Banking 1592469660'
+        payment = frappe._dict(row)
+        payment.update(docstatus=1, company='KT Wärmesysteme AG', payment_type='Pay',
+            paid_from='BANK', posting_date='2026-11-02', references=[frappe._dict(
+            reference_doctype='Purchase Invoice', reference_name='ACC-PINV-2026-00017',
+            allocated_amount=63.60)])
+        invoice = frappe._dict(
+            name='ACC-PINV-2026-00017', docstatus=1, company='KT Wärmesysteme AG',
+            supplier='Kantonales Steueramt Aargau', currency='CHF', outstanding_amount=1,
+            bill_no='K 1 180 533 / RNUH', esr_reference=None,
+            esr_reference_number=None, reference_number_full=None)
+        with (patch.object(automation.frappe, 'get_all', side_effect=[[], [row]]),
+              patch.object(automation.frappe, 'get_doc', side_effect=[payment, invoice])):
+            self.assertFalse(automation._already_booked_entry(
+                MagicMock(company='KT Wärmesysteme AG'), statement, entry))
+
+    def test_processing_skips_proven_existing_payment_even_with_candidate(self):
+        entry = {'issues': [], 'candidates': [{'party_match': 'SUPPLIER'}]}
+        record = MagicMock(
+            ack_state='Confirmed', new_file_hashes_json=json.dumps(['digest']),
+            profile=automation.PROFILE, name='EBICS-1', booked_count=2)
+        with (patch.object(automation, '_verify_receipt', return_value=b'payload'),
+              patch.object(automation, '_preview', return_value={
+                  'statements': [{'entries': [entry]}]}),
+              patch.object(automation, '_already_booked_entry', return_value=True) as existing,
+              patch.object(automation, '_book_exact_match') as book):
+            result = automation._process_download(MagicMock(), record)
+        self.assertEqual(result, {'booked': 0, 'review': 0})
+        existing.assert_called_once()
+        book.assert_not_called()
+        record.db_set.assert_called_once_with({
+            'booked_count': 2, 'review_count': 0, 'processing_state': 'Completed'}, commit=True)
+
     @staticmethod
     def _invoice():
         return frappe._dict(name="SINV-1", docstatus=1, company="KT Wärmesysteme AG",

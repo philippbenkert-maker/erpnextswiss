@@ -76,10 +76,17 @@ verändert. Ohne gültige Kontierung wird nichts gebucht.
 Bestätigte Archive im Status `Review` werden im nächsten Lauf erneut gegen
 den aktuellen Rechnungsstand geprüft (zusammen mit `Pending` maximal 100
 Archive pro Lauf). Bereits gebuchte Zahlungen bleiben über ihre Referenz
-gesperrt. Unterdrückte Kandidaten werden nur dann als erledigt gewertet, wenn
-eine eingereichte Zahlung mit identischem Bankkonto, Betrag, Datum und Währung
-nachgewiesen ist; ein vorhandener Entwurf genügt nicht. Buchungszähler bleiben
-bei Wiederholung kumulativ erhalten.
+gesperrt. Bereits eingereichte Zahlungen werden nur dann als erledigt gewertet, wenn
+Bankkonto, Betrag, Datum und Währung exakt übereinstimmen; ein vorhandener
+Entwurf genügt nicht. Falls ein früherer Kontoauszug und der aktuelle
+EBICS-Abruf unterschiedliche Referenzen liefern, wird zusätzlich die aus dem
+validierten `O/...`-Feld gewonnene E-Banking-Nummer mit der ausdrücklich als
+`E-Banking` bezeichneten Nummer in den Zahlungsbemerkungen abgeglichen. Dafür
+müssen genau ein Empfänger, genau eine eingereichte Zahlung und genau eine
+vollständig ausgeglichene Rechnung derselben Firma, Partei und Währung
+nachgewiesen sein. Die Rechnungsreferenz muss auch im aktuellen Banktext stehen.
+Mehrdeutige oder nur ähnlich aussehende Bewegungen bleiben zur Prüfung.
+Buchungszähler bleiben bei Wiederholung kumulativ erhalten.
 
 Die native Abnahme `scripts/test_ebics_matching_restore.py` darf ausschliesslich
 auf der internen Wegwerf-Site `kt-platform-test.local` ausgeführt werden. Sie
