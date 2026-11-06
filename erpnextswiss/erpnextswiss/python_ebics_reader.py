@@ -87,7 +87,7 @@ class ReadOnlyTransport:
             raise BankFileError("EBICS request exceeds its limit")
         root = _xml(body)
         order = root.xpath("e:header/e:static/e:OrderDetails/e:AdminOrderType/text()", namespaces=NS)
-        if order == ["HPB"] and etree.QName(root).localname == "ebicsNoPubKeyDigestsRequest":
+        if order == ["HPB"] and root.tag == "{" + NAMESPACE + "}ebicsNoPubKeyDigestsRequest":
             return "HPB"
         if root.tag != "{" + NAMESPACE + "}ebicsRequest":
             raise BankFileError("Forbidden EBICS request")
@@ -129,7 +129,19 @@ class ReadOnlyTransport:
             with self.opener.open(request, timeout=min(30, remaining)) as response:
                 if response.status != 200 or response.headers.get("Content-Encoding", "identity") != "identity":
                     raise BankFileError("Unexpected EBICS HTTP response")
-                raw = response.read(min(MAX_RESPONSE, MAX_WIRE_BYTES - self.wire_bytes) + 1)
+                limit = min(MAX_RESPONSE, MAX_WIRE_BYTES - self.wire_bytes)
+                chunks, size = [], 0
+                # read1 returns after one underlying read. A drip-feed server
+                # must not keep an unbounded read(n) alive past our lock lease.
+                while size <= limit:
+                    if self.clock() >= self.deadline:
+                        raise BankFileError("EBICS response deadline expired")
+                    chunk = response.read1(min(65536, limit + 1 - size))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    size += len(chunk)
+                raw = b"".join(chunks)
         except BankFileError:
             raise
         except Exception:
@@ -138,8 +150,10 @@ class ReadOnlyTransport:
         if self.wire_bytes > MAX_WIRE_BYTES or self.clock() >= self.deadline:
             raise BankFileError("EBICS response budget exhausted")
         root = _xml(raw)
+        ids = root.xpath("e:header/e:static/e:TransactionID/text()", namespaces=NS)
+        if kind in ("Transfer", "Receipt") and ids and ids != [self.transaction_id]:
+            raise BankFileError("Bank response transaction identity changed")
         if kind == "BTD":
-            ids = root.xpath("e:header/e:static/e:TransactionID/text()", namespaces=NS)
             if ids:
                 if len(ids) != 1 or not TRANSACTION_ID.fullmatch(ids[0]):
                     raise BankFileError("Invalid EBICS transaction identity")

@@ -1,18 +1,17 @@
 """Real pinned SDK, synthetic keys, signed bank responses, no network or ERP writes."""
 import base64
 from io import BytesIO
-from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 from zipfile import ZipFile
 
 from ebicsclient import Bank, BankKeys, Client, User, VersionPolicy, generate_keyring, crypto
-from ebicsclient.errors import ReceiptMismatchError, ResponseAuthenticationError
+from ebicsclient.errors import MessageVersionMismatchError, ReceiptMismatchError, ResponseAuthenticationError
 from ebicsclient.protocol import h005
 from lxml import etree
 
 from erpnextswiss.erpnextswiss.python_ebics_reader import (
-    PythonEbicsReader, ReadOnlyTransport, BankFileError, MAX_RESPONSE, NS, NAMESPACE,
+    PythonEbicsReader, ReadOnlyTransport, BankFileError, MAX_RESPONSE, NAMESPACE,
 )
 
 
@@ -49,10 +48,10 @@ class TestPythonEbicsReader(unittest.TestCase):
         root.insert(1, crypto.build_auth_signature(root, self.bank_ring.authentication, NAMESPACE))
         return etree.tostring(root)
 
-    def payload(self):
+    def payload(self, version="08"):
         out = BytesIO()
         with ZipFile(out, "w") as archive:
-            archive.writestr("statement.xml", '<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08"><BkToCstmrStmt/></Document>')
+            archive.writestr("statement.xml", f'<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.{version}"><BkToCstmrStmt/></Document>')
         return out.getvalue()
 
     def responses(self, payload=None, segments=1):
@@ -103,9 +102,9 @@ class TestPythonEbicsReader(unittest.TestCase):
         self.assertEqual(len(opener.requests), 1)
 
     def test_wrong_message_version_is_not_acknowledged(self):
-        reader, opener, _ = self.reader(self.responses(self.payload().replace(b".001.08", b".001.04")))
+        reader, opener, _ = self.reader(self.responses(self.payload("04")))
         persist = Mock()
-        with self.assertRaises(Exception): reader.download(persist)
+        with self.assertRaises(MessageVersionMismatchError): reader.download(persist)
         persist.assert_not_called()
         self.assertNotIn(b"<ReceiptCode>0</ReceiptCode>", b"".join(opener.requests))
 
@@ -135,6 +134,21 @@ class TestPythonEbicsReader(unittest.TestCase):
         reader, opener, _ = self.reader([])
         with self.assertRaises(BankFileError): reader.confirm("A" * 32, Mock(side_effect=BankFileError("corrupt")))
         self.assertEqual(opener.requests, [])
+
+    def test_receipt_for_another_transaction_is_not_success(self):
+        reader, _, _ = self.reader([self.responses()[0], self.signed(
+            static=f'<TransactionID>{"B"*32}</TransactionID>', code="011000")])
+        with self.assertRaises(BankFileError): reader.download(Mock())
+
+    def test_drip_feed_is_stopped_at_deadline(self):
+        reader, opener, _ = self.reader(self.responses())
+        moments = iter([1, 1, 121])
+        reader.transport.deadline = 120
+        reader.transport.clock = lambda: next(moments)
+        request = h005.build_download_receipt_request(reader.bank, reader.keyring, "A" * 32, positive=False)
+        reader.transport.transaction_id = "A" * 32
+        with self.assertRaises(BankFileError): reader.transport.post(request)
+        self.assertEqual(len(opener.requests), 1)
 
     def test_no_data_is_authenticated_and_returns_none(self):
         reader, _, _ = self.reader([self.signed(code="090005")])

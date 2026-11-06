@@ -10,7 +10,9 @@ import frappe
 
 fintech.register()
 with tempfile.TemporaryDirectory(prefix="ebics-tests-") as directory:
+    (Path(directory) / "apps.txt").write_text("frappe\nerpnext\nerpnextswiss\n", encoding="utf-8")
     (Path(directory) / "test.invalid").mkdir()
+    (Path(directory) / "test.invalid" / "site_config.json").write_text("{}", encoding="utf-8")
     frappe.init(site="test.invalid", sites_path=directory, force=True)
     frappe.local.db = MagicMock()
     try:

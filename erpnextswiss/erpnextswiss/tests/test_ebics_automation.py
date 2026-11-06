@@ -237,7 +237,7 @@ class TestEbicsAutomation(TestCase):
         pending = MagicMock(requested_date="2026-09-28")
         events = []
         with (patch.object(automation, "_pending_receipt", return_value=pending),
-              patch.object(automation, "_acknowledge", side_effect=lambda c, d: events.append("ack"))):
+              patch.object(automation, "_acknowledge", side_effect=lambda c, d, **kw: events.append("ack"))):
             automation._download_pending(connection, date(2026, 9, 29))
         self.assertEqual(events, ["ack"])
         connection.get_client.assert_not_called()
@@ -292,6 +292,7 @@ class TestEbicsAutomation(TestCase):
 
     def test_python_reader_failed_bank_reply_leaves_receipt_pending(self):
         connection = MagicMock(scope="CH", statement_btf_version="08")
+        connection.name = "AKB"
         record = MagicMock()
         record.insert.return_value = record
         archive = automation._zip_from_receipt(automation._archive_bytes({"bank.xml": xml()}))
@@ -310,6 +311,7 @@ class TestEbicsAutomation(TestCase):
 
     def test_python_reader_rejects_no_data_after_persistence(self):
         connection = MagicMock(scope="CH", statement_btf_version="08")
+        connection.name = "AKB"
         record = MagicMock()
         record.insert.return_value = record
         archive = automation._zip_from_receipt(automation._archive_bytes({"bank.xml": xml()}))

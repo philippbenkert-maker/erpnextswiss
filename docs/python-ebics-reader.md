@@ -25,7 +25,9 @@ only, in the configured 04/08 format. Transfers/receipts must retain the same
 transaction ID. Upload/key-init orders, environment proxies and redirects are
 refused. TLS >=1.2 with hostname/CA verification and SDK bank signatures remain
 mandatory. HTTP response 8 MiB, aggregate response 20 MiB, <=64 segments, <=66
-exchanges and 120-second order deadline bound the network. Requests take <=30s.
+exchanges and a 120-second order budget bound the network. Reads are checked
+between chunks with a socket timeout <=30s (one blocked read can overrun the
+budget by that timeout); a drip-feed cannot keep a single read alive forever.
 The SDK's bounded outer inflation has a 512 MiB cap; our decrypted archive cap
 is 32 MiB and inner ZIP/XML admission applies its tighter existing limits. The
 512 MiB SDK allocation limit is not a 32 MiB process-memory guarantee.
