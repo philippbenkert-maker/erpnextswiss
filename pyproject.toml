@@ -4,7 +4,7 @@ authors = [
     { name = "libracore AG", email = "info@libracore.com"}
 ]
 description = "ERPNext extension for Switzerland"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 readme = "README.md"
 dynamic = ["version"]
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
     "opencv-python",
     "pymupdf",
     "fintech",
+    "ebicsclient==2.0.0",
     "icalendar",
     "lxml",
     "paramiko<4",

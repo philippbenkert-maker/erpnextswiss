@@ -15,7 +15,7 @@ import frappe
 from frappe.config import get_site_config
 
 from erpnextswiss.scripts.bank_camt_preview import preview_camt_archive
-from erpnextswiss.scripts.bank_file_admission import BankFileError, MAX_FILE_BYTES, MAX_TOTAL_BYTES
+from erpnextswiss.scripts.bank_file_admission import BankFileError, MAX_FILE_BYTES, MAX_TOTAL_BYTES, read_bank_archive
 
 
 PROFILE = "camt.053.001.08"
@@ -162,12 +162,19 @@ def _classify_files(payload, known_files):
     }, new_hashes
 
 
-def _acknowledge(connection, record, client=None):
+def _acknowledge(connection, record, client=None, reader=None):
     if record.ack_state == "Confirmed":
         return
     _verify_receipt(record)
     # The bank reply is sent only after a completed ERP commit and readback.
-    (client or connection.get_client()).confirm_download(trans_id=record.bank_transaction_id)
+    if reader is not None:
+        def verify(transaction_id):
+            if transaction_id != record.bank_transaction_id:
+                raise BankFileError("Stored receipt transaction identity changed")
+            _verify_receipt(frappe.get_doc("EBICS Download", record.name))
+        reader.confirm(record.bank_transaction_id, verify)
+    else:
+        (client or connection.get_client()).confirm_download(trans_id=record.bank_transaction_id)
     record.db_set("ack_state", "Confirmed", commit=True)
 
 
@@ -179,7 +186,7 @@ def _pending_receipt(connection):
     return frappe.get_doc("EBICS Download", names[0]) if names else None
 
 
-def _download_pending(connection, requested_date, known_files=None):
+def _download_pending(connection, requested_date, known_files=None, reader=None):
     """Fetch one bank-provided current file set, never a historical DateRange.
 
     requested_date is the ERP retrieval date for audit, not a filter sent to the
@@ -188,8 +195,11 @@ def _download_pending(connection, requested_date, known_files=None):
     """
     pending = _pending_receipt(connection)
     if pending:
-        _acknowledge(connection, pending)
+        _acknowledge(connection, pending, reader=reader)
         return pending
+
+    if reader is not None:
+        return _download_python(connection, requested_date, known_files, reader)
 
     from fintech.ebics import BusinessTransactionFormat
 
@@ -229,6 +239,61 @@ def _download_pending(connection, requested_date, known_files=None):
     for digest in new_hashes:
         known_files[digest] = record.name
     return record
+
+
+def _download_python(connection, requested_date, known_files, reader):
+    profile = _statement_profile(connection)
+    known_files = _known_files(connection) if known_files is None else known_files
+    records = []
+
+    def persist(transaction_id, archive):
+        if not isinstance(transaction_id, str) or not _TRANSACTION_ID.fullmatch(transaction_id):
+            raise BankFileError("EBICS did not supply a safe receipt transaction ID")
+        admitted = read_bank_archive(archive, profile)
+        payload = _archive_bytes({member.name: member.content for member in admitted.files})
+        _preview(payload, connection, profile=profile)
+        name = _receipt_key(connection.name, transaction_id)
+        # The pinned SDK does not retry automatically. Reject a callback replay,
+        # including one with altered bytes, rather than acknowledging twice.
+        if records or frappe.db.exists("EBICS Download", name):
+            raise BankFileError("EBICS transaction identity is already archived")
+        metadata, new_hashes = _classify_files(payload, known_files)
+        record = frappe.get_doc({
+            "doctype": "EBICS Download", "download_key": name, "connection": connection.name,
+            "company": connection.company, "requested_date": requested_date.isoformat(),
+            "profile": profile, "bank_transaction_id": transaction_id, "ack_state": "Pending",
+            "processing_state": "Duplicate" if not new_hashes else "Pending", **metadata,
+            "payload_sha256": sha256(payload).hexdigest(), "payload_bytes": len(payload),
+            "payload_json": payload.decode("utf-8"),
+        }).insert(ignore_permissions=True)
+        frappe.db.commit()
+        _verify_receipt(frappe.get_doc("EBICS Download", record.name))
+        records.append((record, new_hashes))
+        # Returning authorizes ONLY this transaction's positive bank receipt.
+
+    transaction_id = reader.download(persist)
+    if transaction_id is None:
+        if records:
+            raise BankFileError("Bank reported no data after a persisted download")
+        return None
+    if len(records) != 1 or records[0][0].bank_transaction_id != transaction_id:
+        raise BankFileError("Bank receipt does not match the durable ERP download")
+    record, new_hashes = records[0]
+    # SDK returns only after authenticated positive receipt confirmation.
+    record.db_set("ack_state", "Confirmed", commit=True)
+    for digest in new_hashes:
+        known_files[digest] = record.name
+    return record
+
+
+def _configured_reader(connection):
+    provider = get_site_config(cached=False).get("ebics_statement_reader", "fintech")
+    if provider == "fintech":
+        return None
+    if provider != "ebicsclient":
+        raise BankFileError("Unknown configured EBICS statement reader")
+    from erpnextswiss.erpnextswiss.python_ebics_reader import PythonEbicsReader
+    return PythonEbicsReader(connection)
 
 
 def _money(value):
@@ -374,7 +439,7 @@ def _process_download(connection, record):
 
 def sync_connection(connection_name, debug=False):
     """Drain current pending bank files, with durable receipts and no payments."""
-    lock = frappe.cache().lock("ebics-download:" + connection_name, timeout=300, blocking_timeout=0)
+    lock = frappe.cache().lock("ebics-download:" + connection_name, timeout=3600, blocking_timeout=0)
     if not lock.acquire(blocking=False):
         return {"status": "already_running"}
     try:
@@ -382,6 +447,7 @@ def sync_connection(connection_name, debug=False):
         if not connection.enable_sync or not connection.activated or connection.ebics_version != "H005":
             return {"status": "disabled"}
         _statement_profile(connection)
+        reader = _configured_reader(connection)
         waiting = frappe.get_all("EBICS Download", filters={"connection": connection.name,
                                                           "ack_state": "Confirmed", "processing_state": "Pending"},
                                  pluck="name", order_by="creation asc", limit_page_length=100)
@@ -392,7 +458,7 @@ def sync_connection(connection_name, debug=False):
         pending = _pending_receipt(connection)
         if pending:
             # Resolve an interrupted bank acknowledgement before any other BTD.
-            resumed = _download_pending(connection, frappe.utils.getdate(pending.requested_date))
+            resumed = _download_pending(connection, frappe.utils.getdate(pending.requested_date), reader=reader)
             if resumed.processing_state == "Pending":
                 _process_download(connection, resumed)
             elif resumed.processing_state == "Duplicate":
@@ -405,7 +471,7 @@ def sync_connection(connection_name, debug=False):
         fetched = 0
         exhausted = True
         for _ in range(MAX_DOWNLOADS_PER_RUN):
-            record = _download_pending(connection, frappe.utils.getdate(), known_files)
+            record = _download_pending(connection, frappe.utils.getdate(), known_files, reader=reader)
             if record is None:
                 exhausted = False
                 break
