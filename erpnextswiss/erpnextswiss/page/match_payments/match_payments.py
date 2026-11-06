@@ -6,6 +6,8 @@ import frappe
 from frappe import throw, _
 from erpnextswiss.erpnextswiss.page.bankimport.bankimport import create_reference
 
+NON_ASSIGNABLE_INTERNAL_TRANSFER_MARKER = 'Nicht zuzuweisende interne Übertragung'
+
 @frappe.whitelist()
 def get_open_sales_invoices():
     # get unpaid sales invoices
@@ -53,10 +55,19 @@ def _submitted_equivalent_exists(payment):
         'parent': match['name'], 'parenttype': 'Payment Entry'}))
 
 
+def _is_non_assignable_internal_transfer(payment):
+    remarks = payment.get('remarks')
+    return (
+        payment.get('custom_remarks') == 1
+        and isinstance(remarks, str)
+        and remarks.startswith(NON_ASSIGNABLE_INTERNAL_TRANSFER_MARKER)
+    )
+
+
 @frappe.whitelist()
 def get_unallocated_payment_entries():
     sql_query = ("""SELECT `name`, `company`, `party`, `paid_amount`, `received_amount`,
-                       `unallocated_amount`, `posting_date`, `remarks`, `reference_no`,
+                       `unallocated_amount`, `posting_date`, `custom_remarks`, `remarks`, `reference_no`,
                        `paid_to`, `paid_from_account_currency`, `paid_to_account_currency`
                 FROM `tabPayment Entry`
                 WHERE `docstatus` = 0
@@ -64,7 +75,11 @@ def get_unallocated_payment_entries():
                   AND `unallocated_amount` > 0
                 ORDER BY `posting_date` ASC""")
     drafts = frappe.db.sql(sql_query, as_dict=True)
-    unallocated = [payment for payment in drafts if not _submitted_equivalent_exists(payment)]
+    unallocated = [
+        payment for payment in drafts
+        if not _is_non_assignable_internal_transfer(payment)
+        and not _submitted_equivalent_exists(payment)
+    ]
     return {'unallocated_payment_entries': unallocated}
 
 @frappe.whitelist(methods=["POST"])

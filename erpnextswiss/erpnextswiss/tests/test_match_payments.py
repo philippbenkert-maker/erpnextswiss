@@ -14,7 +14,7 @@ class TestMatchPayments(TestCase):
         return frappe._dict(
             name='ACC-PAY-DRAFT', company='KT Wärmesysteme AG', party='Bankimport Unbekannter Kunde',
             paid_amount=4229.43, received_amount=4229.43, unallocated_amount=4229.43,
-            posting_date='2026-07-14', remarks='Bank entry', reference_no='3200980681/1',
+            posting_date='2026-07-14', custom_remarks=0, remarks='Bank entry', reference_no='3200980681/1',
             paid_to='BANK', paid_from_account_currency='CHF', paid_to_account_currency='CHF')
 
     def test_submitted_assigned_base_reference_hides_legacy_suffix_draft(self):
@@ -41,3 +41,16 @@ class TestMatchPayments(TestCase):
                       patch.object(match_payments.frappe.db, 'exists', return_value=assigned)):
                     result = match_payments.get_unallocated_payment_entries()
                 self.assertEqual(result, {'unallocated_payment_entries': [draft]})
+
+    def test_marked_internal_bank_transfer_is_not_offered_for_customer_assignment(self):
+        draft = self._draft()
+        draft.custom_remarks = 1
+        draft.remarks = (
+            "Nicht zuzuweisende interne Übertragung vom AG-Kapitaleinzahlungskonto "
+            "auf das operative Bankkonto."
+        )
+        with (patch.object(match_payments.frappe.db, 'sql', return_value=[draft]),
+              patch.object(match_payments.frappe, 'get_all') as lookup):
+            result = match_payments.get_unallocated_payment_entries()
+        self.assertEqual(result, {'unallocated_payment_entries': []})
+        lookup.assert_not_called()
