@@ -16,16 +16,56 @@ def get_open_sales_invoices():
     unpaid_sales_invoices = frappe.db.sql(sql_query, as_dict=True)
     return {'unpaid_sales_invoices': unpaid_sales_invoices }
 
+def _reference_variants(reference):
+    if not isinstance(reference, str) or not reference.strip():
+        return set()
+    reference = reference.strip()
+    variants = {reference}
+    if reference.endswith('/1'):
+        variants.add(reference[:-2])
+    else:
+        variants.add(reference + '/1')
+    return variants
+
+
+def _submitted_equivalent_exists(payment):
+    """Hide a legacy draft only when one submitted, assigned cash movement proves it obsolete."""
+    references = _reference_variants(payment.get('reference_no'))
+    if not references:
+        return False
+    matches = frappe.get_all('Payment Entry', filters={
+        'company': payment.get('company'), 'docstatus': 1, 'payment_type': 'Receive',
+        'paid_to': payment.get('paid_to'), 'posting_date': payment.get('posting_date'),
+        'reference_no': ('in', list(references))},
+        fields=['name', 'paid_amount', 'received_amount', 'paid_from_account_currency',
+                'paid_to_account_currency', 'unallocated_amount'],
+        limit_page_length=2)
+    if len(matches) != 1:
+        return False
+    match = matches[0]
+    if (match.get('paid_amount') != payment.get('paid_amount')
+            or match.get('received_amount') != payment.get('received_amount')
+            or match.get('paid_from_account_currency') != payment.get('paid_from_account_currency')
+            or match.get('paid_to_account_currency') != payment.get('paid_to_account_currency')
+            or match.get('unallocated_amount') != 0):
+        return False
+    return bool(frappe.db.exists('Payment Entry Reference', {
+        'parent': match['name'], 'parenttype': 'Payment Entry'}))
+
+
 @frappe.whitelist()
 def get_unallocated_payment_entries():
-    # get unallocated payment entries
-    sql_query = ("""SELECT `name`, `party`, `paid_amount`, `posting_date`, `remarks` 
-                FROM `tabPayment Entry` 
-                WHERE `docstatus` = 0  
-                  AND `payment_type` = 'Receive' 
+    sql_query = ("""SELECT `name`, `company`, `party`, `paid_amount`, `received_amount`,
+                       `unallocated_amount`, `posting_date`, `remarks`, `reference_no`,
+                       `paid_to`, `paid_from_account_currency`, `paid_to_account_currency`
+                FROM `tabPayment Entry`
+                WHERE `docstatus` = 0
+                  AND `payment_type` = 'Receive'
+                  AND `unallocated_amount` > 0
                 ORDER BY `posting_date` ASC""")
-    unallocated_payment_entries = frappe.db.sql(sql_query, as_dict=True)
-    return {'unallocated_payment_entries': unallocated_payment_entries }
+    drafts = frappe.db.sql(sql_query, as_dict=True)
+    unallocated = [payment for payment in drafts if not _submitted_equivalent_exists(payment)]
+    return {'unallocated_payment_entries': unallocated}
 
 @frappe.whitelist(methods=["POST"])
 def match(sales_invoice, payment_entry):

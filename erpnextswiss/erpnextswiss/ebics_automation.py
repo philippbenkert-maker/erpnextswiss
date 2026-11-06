@@ -442,23 +442,135 @@ def _discount_payment(invoice, doctype, candidate, statement, amount, download_n
     return pe
 
 
+def _zero_money(value):
+    try:
+        amount = Decimal(str(value))
+        return amount.is_finite() and amount == Decimal('0.00')
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
+def _cross_export_ebanking_id(entry):
+    """Return one AKB e-banking identity carried by the authenticated XML fields."""
+    identities = set()
+    values = {entry.get('reference'), entry.get('entry_reference')}
+    values.update(entry.get('bank_detail_references') or [])
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        match = re.fullmatch(r'O/(\d{6,30})(?:-1)?', value.strip())
+        if match:
+            identities.add(match.group(1))
+    return next(iter(identities)) if len(identities) == 1 else None
+
+
+def _remarks_mention_ebanking_id(remarks, identity):
+    if not isinstance(remarks, str) or not identity:
+        return False
+    labelled = re.findall(
+        r'(?i)(?:e|electronic)[ -]?banking(?:[ -]?(?:nr|nummer))?\.?\s*[:#=-]?\s*(\d{6,30})',
+        remarks)
+    return identity in labelled
+
+
+def _cash_shape_matches(payment, amount, currency):
+    return (all(_money(payment.get(key)) == amount for key in ('paid_amount', 'received_amount'))
+            and all(payment.get(key) == currency
+                    for key in ('paid_from_account_currency', 'paid_to_account_currency')))
+
+
+def _invoice_reference_matches(invoice, text):
+    accepted = {str(invoice.name)}
+    accepted.update(str(value) for value in (invoice.get('bill_no'), invoice.get('esr_reference'),
+                                             invoice.get('esr_reference_number'),
+                                             invoice.get('reference_number_full'))
+                    if value and len(str(value)) >= 6)
+    return any(_reference_mentions(value, text) for value in accepted)
+
+
+def _cross_export_payment_matches(connection, statement, entry, amount, incoming):
+    """Prove that an O/... bank entry is the same cash movement as a submitted ERP payment."""
+    if len(entry.get('candidates') or []) != 1:
+        return False
+    candidate = entry['candidates'][0]
+    posting_date = (entry.get('booking_date') or '')[:10]
+    party_type = 'Customer' if incoming else 'Supplier'
+    expected_doctype = 'Sales Invoice' if incoming else 'Purchase Invoice'
+    if (candidate.get('credit_debit') != entry.get('credit_debit')
+            or _money(candidate.get('amount')) != amount
+            or candidate.get('currency') != statement.get('currency')
+            or candidate.get('date') != posting_date
+            or not isinstance(candidate.get('party_match'), str)
+            or not candidate.get('party_match')
+            or not isinstance(candidate.get('transaction_reference'), str)
+            or not candidate.get('transaction_reference')):
+        return False
+    identity = _cross_export_ebanking_id(entry)
+    if identity is None:
+        return False
+
+    bank_field = 'paid_to' if incoming else 'paid_from'
+    payment_type = 'Receive' if incoming else 'Pay'
+    matches = frappe.get_all('Payment Entry', filters={
+        'company': connection.company, 'docstatus': 1, 'payment_type': payment_type,
+        bank_field: statement['account'], 'posting_date': posting_date},
+        fields=['name', 'paid_amount', 'received_amount', 'paid_from_account_currency',
+                'paid_to_account_currency', 'party_type', 'party', 'remarks'],
+        limit_page_length=21)
+    if len(matches) >= 21:
+        return False
+    proven = []
+    for row in matches:
+        if (not _cash_shape_matches(row, amount, statement['currency'])
+                or row.get('party_type') != party_type
+                or row.get('party') != candidate['party_match']
+                or not _remarks_mention_ebanking_id(row.get('remarks'), identity)):
+            continue
+        payment = frappe.get_doc('Payment Entry', row['name'])
+        references = payment.get('references') or []
+        if (payment.docstatus != 1 or payment.company != connection.company
+                or payment.payment_type != payment_type
+                or payment.get(bank_field) != statement['account']
+                or str(payment.posting_date)[:10] != posting_date
+                or not _cash_shape_matches(payment, amount, statement['currency'])
+                or payment.party_type != party_type or payment.party != candidate['party_match']
+                or not _remarks_mention_ebanking_id(payment.get('remarks'), identity)
+                or len(references) != 1
+                or references[0].get('reference_doctype') != expected_doctype
+                or _money(references[0].get('allocated_amount')) != amount):
+            continue
+        invoice = frappe.get_doc(expected_doctype, references[0].get('reference_name'))
+        party_field = 'customer' if incoming else 'supplier'
+        if (invoice.docstatus != 1 or invoice.company != connection.company
+                or invoice.get(party_field) != candidate['party_match']
+                or invoice.currency != statement['currency']
+                or not _zero_money(invoice.outstanding_amount)
+                or not _invoice_reference_matches(invoice, candidate['transaction_reference'])):
+            continue
+        proven.append(payment.name)
+    return len(proven) == 1
+
+
 def _already_booked_entry(connection, statement, entry):
-    """A suppressed legacy candidate can also be a draft; only a posted cash match resolves it."""
+    """Resolve only a posted payment proven to represent this exact bank movement."""
     amount = _money(entry['amount'])
-    if entry['issues'] or entry['detail_count'] > 1 or amount is None:
+    direction = entry.get('credit_debit')
+    if (entry['issues'] or entry['detail_count'] != 1 or amount is None
+            or direction not in ('CRDT', 'DBIT')):
         return False
     refs = list(_verified_bank_references(entry) - {statement.get('iban')})
     if not refs:
         return False
-    incoming = entry['credit_debit'] == 'CRDT'
+    incoming = direction == 'CRDT'
     matches = frappe.get_all('Payment Entry', filters={
         'company': connection.company, 'docstatus': 1, 'reference_no': ('in', refs),
         'payment_type': 'Receive' if incoming else 'Pay',
         'paid_to' if incoming else 'paid_from': statement['account'],
         'posting_date': (entry['booking_date'] or '')[:10]},
         fields=['paid_amount', 'received_amount', 'paid_from_account_currency', 'paid_to_account_currency'])
-    return len(matches) == 1 and all(_money(matches[0].get(k)) == amount for k in ('paid_amount', 'received_amount')) \
-        and all(matches[0].get(k) == statement['currency'] for k in ('paid_from_account_currency', 'paid_to_account_currency'))
+    if len(matches) == 1 and _cash_shape_matches(matches[0], amount, statement['currency']):
+        return True
+    return _cross_export_payment_matches(connection, statement, entry, amount, incoming)
 
 
 def _book_exact_match(connection, statement, entry, download_name):
@@ -535,9 +647,7 @@ def _process_download(connection, record):
     booked = review = 0
     for statement in preview["statements"]:
         for entry in statement["entries"]:
-            if (not entry['issues'] and not entry['candidates']
-                    and entry.get('suppressed_by_existing_matcher', 0) > 0
-                    and _already_booked_entry(connection, statement, entry)):
+            if not entry['issues'] and _already_booked_entry(connection, statement, entry):
                 continue
             try:
                 if _book_exact_match(connection, statement, entry, record.name):

@@ -21,6 +21,7 @@ with tempfile.TemporaryDirectory(prefix="ebics-tests-") as directory:
             suite = unittest.defaultTestLoader.loadTestsFromNames([
                 "erpnextswiss.erpnextswiss.tests.test_ebics_automation",
                 "erpnextswiss.erpnextswiss.tests.test_python_ebics_reader",
+                "erpnextswiss.erpnextswiss.tests.test_match_payments",
             ])
             result = unittest.TextTestRunner(verbosity=2).run(suite)
             if not result.wasSuccessful() or result.skipped:
