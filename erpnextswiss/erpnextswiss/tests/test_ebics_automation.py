@@ -1,6 +1,7 @@
 """Offline safety regressions for the scheduled AKB retrieval and exact match."""
 
 from datetime import date
+from decimal import Decimal
 from hashlib import sha256
 import json
 from unittest import TestCase
@@ -351,7 +352,7 @@ class TestEbicsAutomation(TestCase):
 
         with (patch.object(automation.frappe, "cache"),
               patch.object(automation.frappe, "get_doc", return_value=connection),
-              patch.object(automation.frappe, "get_all", return_value=[]),
+              patch.object(automation.frappe, "get_all", return_value=[]) as waiting,
               patch.object(automation.frappe.utils, "getdate", return_value=date(2026, 9, 29)),
               patch.object(automation, "_pending_receipt", return_value=None),
               patch.object(automation, "_known_files", return_value={}),
@@ -359,6 +360,8 @@ class TestEbicsAutomation(TestCase):
               patch.object(automation, "_process_download") as process):
             result = automation.sync_connection("AKB")
         self.assertEqual(result, {"status": "ok", "downloads_fetched": 2})
+        self.assertEqual(waiting.call_args.kwargs['order_by'], 'modified asc, creation asc')
+        self.assertEqual(waiting.call_args.kwargs['filters']['processing_state'], ('in', ['Pending', 'Review']))
         self.assertEqual(download.call_count, 3)
         self.assertTrue(all(call.args[:2] == (connection, date(2026, 9, 29))
                             for call in download.call_args_list))
@@ -651,6 +654,84 @@ class TestEbicsAutomation(TestCase):
                  "credit_debit": "CRDT", "booking_date": "2026-09-28", "reference": "BANK-REF-1",
                  "entry_reference": None}
         return statement, entry
+
+    def test_single_detail_bank_reference_and_group_suffix_are_accepted(self):
+        statement, entry = self._candidate()
+        invoice = self._invoice()
+        with patch.object(automation.frappe, 'get_doc', return_value=invoice):
+            for reference in ['BANK-REF-1-1', 'DETAIL-123']:
+                entry['bank_detail_references'] = ['DETAIL-123']
+                entry['candidates'][0]['unique_reference'] = reference
+                self.assertIsNotNone(automation._strict_invoice_candidate(
+                    MagicMock(company=invoice.company), statement, entry))
+            entry['candidates'][0]['unique_reference'] = 'BANK-REF-1-2'
+            self.assertIsNone(automation._strict_invoice_candidate(
+                MagicMock(company=invoice.company), statement, entry))
+
+    @staticmethod
+    def _discount_invoice():
+        invoice = TestEbicsAutomation._invoice()
+        invoice.update(grand_total=100, conversion_rate=1, posting_date='2026-09-20',
+                       payment_schedule=[frappe._dict(payment_term='2 percent 10 days',
+                           outstanding=100, paid_amount=0, discounted_amount=0,
+                           discount_type='Percentage', discount=2, discount_date='2026-09-30')])
+        return invoice
+
+    def test_discount_exact_deadline_and_decimal_rounding(self):
+        invoice = self._discount_invoice()
+        self.assertEqual(automation._contract_discount(invoice, Decimal('98'), '2026-09-30'), Decimal('2'))
+        invoice.grand_total = invoice.outstanding_amount = 12345.67
+        invoice.payment_schedule[0].outstanding = 12345.67
+        self.assertEqual(automation._contract_discount(invoice, Decimal('12098.76'), '2026-09-30'), Decimal('246.91'))
+
+    def test_discount_rejects_unexplained_difference_late_partial_supplier_or_used_term(self):
+        for key, value in [('discount_date', '2026-09-27'), ('paid_amount', 1),
+                           ('discounted_amount', 1), ('outstanding', 99),
+                           ('discount', -2), ('discount', 'NaN'), ('discount_type', 'Unknown')]:
+            invoice = self._discount_invoice()
+            invoice.payment_schedule[0][key] = value
+            self.assertIsNone(automation._contract_discount(invoice, Decimal('98'), '2026-09-28'))
+        for key, value in [('supplier', 'Supplier'), ('conversion_rate', 1.1),
+                           ('grand_total', 101), ('is_return', 1), ('posting_date', '2026-09-29')]:
+            invoice = self._discount_invoice()
+            invoice[key] = value
+            self.assertIsNone(automation._contract_discount(invoice, Decimal('98'), '2026-09-28'))
+        invoice = self._discount_invoice()
+        self.assertIsNone(automation._contract_discount(invoice, Decimal('97.99'), '2026-09-28'))
+        invoice.payment_schedule.append(invoice.payment_schedule[0].copy())
+        self.assertIsNone(automation._contract_discount(invoice, Decimal('98'), '2026-09-28'))
+
+    def test_discount_match_still_requires_strong_invoice_reference(self):
+        statement, entry = self._candidate()
+        entry['amount'] = '98.00'
+        entry['candidates'][0]['amount'] = 98
+        invoice = self._discount_invoice()
+        with patch.object(automation.frappe, 'get_doc', return_value=invoice):
+            self.assertIsNotNone(automation._strict_invoice_candidate(MagicMock(company=invoice.company), statement, entry))
+            entry['candidates'][0]['transaction_reference'] = 'Thanks for your service'
+            self.assertIsNone(automation._strict_invoice_candidate(MagicMock(company=invoice.company), statement, entry))
+
+    def test_account_number_is_not_a_unique_bank_payment_reference(self):
+        statement, entry = self._candidate()
+        statement['iban'] = entry['reference']
+        self.assertIsNone(automation._strict_invoice_candidate(MagicMock(), statement, entry))
+
+    def test_non_finite_money_is_not_accepted(self):
+        for value in ['NaN', 'Infinity', '-Infinity']:
+            self.assertIsNone(automation._money(value))
+
+    def test_only_posted_exact_bank_payment_resolves_suppressed_candidate(self):
+        statement, entry = self._candidate()
+        statement['account'] = 'BANK'
+        payment = frappe._dict(paid_amount=100, received_amount=100,
+            paid_from_account_currency='CHF', paid_to_account_currency='CHF')
+        with patch.object(automation.frappe, 'get_all', return_value=[payment]) as lookup:
+            self.assertTrue(automation._already_booked_entry(MagicMock(), statement, entry))
+            self.assertEqual(lookup.call_args.kwargs['filters']['docstatus'], 1)
+            payment.received_amount = 99
+            self.assertFalse(automation._already_booked_entry(MagicMock(), statement, entry))
+        with patch.object(automation.frappe, 'get_all', return_value=[]):
+            self.assertFalse(automation._already_booked_entry(MagicMock(), statement, entry))
 
     @staticmethod
     def _invoice():

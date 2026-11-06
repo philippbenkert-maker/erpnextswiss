@@ -4,7 +4,8 @@ The old statement importer acknowledges before persistence and may submit a
 Payment Entry while downloading. This module never calls that importer.
 """
 
-from decimal import Decimal, InvalidOperation
+from datetime import date
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -299,6 +300,8 @@ def _configured_reader(connection):
 def _money(value):
     try:
         amount = Decimal(str(value))
+        if not amount.is_finite():
+            return None
         rounded = amount.quantize(Decimal("0.01"))
     except (InvalidOperation, TypeError, ValueError):
         return None
@@ -311,6 +314,48 @@ def _reference_mentions(value, text):
     return bool(re.search(r"(?<![A-Za-z0-9])" + re.escape(value) + r"(?![A-Za-z0-9])", text))
 
 
+def _contract_discount(invoice, amount, booking_date):
+    """Only a wholly unpaid, single-term sales invoice with dated agreed discount."""
+    outstanding = _money(invoice.outstanding_amount)
+    if outstanding == amount:
+        return Decimal('0.00')
+    terms = invoice.get('payment_schedule') or []
+    if (len(terms) != 1 or invoice.get('supplier') or invoice.get('is_return')
+            or outstanding is None or outstanding != _money(invoice.get('grand_total'))
+            or Decimal(str(invoice.get('conversion_rate') or 0)) != 1):
+        return None
+    term = terms[0]
+    try:
+        booking = date.fromisoformat(str(booking_date)[:10])
+        if (not term.get('payment_term') or term.get('paid_amount') or term.get('discounted_amount')
+                or _money(term.get('outstanding')) != outstanding
+                or not date.fromisoformat(str(invoice.get('posting_date'))[:10]) <= booking
+                    <= date.fromisoformat(str(term.get('discount_date'))[:10])):
+            return None
+        discount = Decimal(str(term.get('discount')))
+        if not discount.is_finite() or discount <= 0:
+            return None
+        if term.get('discount_type') == 'Percentage':
+            discount = outstanding * discount / 100
+        elif term.get('discount_type') != 'Amount':
+            return None
+        discount = discount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return discount if 0 < discount < outstanding and outstanding - discount == amount else None
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _verified_bank_references(entry):
+    references = {entry.get('reference'), entry.get('entry_reference')}
+    # These values come from explicit paths in schema-validated bank XML,
+    # never from the legacy matcher's inference or a remittance free-text field.
+    if entry['detail_count'] == 1:
+        references.update(entry.get('bank_detail_references') or [])
+        if entry.get('reference'):
+            references.add(entry['reference'] + '-1')
+    return references - {None, '', 'NOTPROVIDED'}
+
+
 def _strict_invoice_candidate(connection, statement, entry):
     """Return one live invoice only when bank, matcher and ledger all agree."""
     if (statement["balance_check"] != "matched" or entry["issues"]
@@ -321,12 +366,12 @@ def _strict_invoice_candidate(connection, statement, entry):
     if (amount is None or amount != _money(candidate.get("amount"))
             or candidate.get("currency") != statement["currency"]
             or candidate.get("credit_debit") != entry["credit_debit"]
-            or candidate.get("date") != (entry["booking_date"] or "")[:10]
-            or amount != _money(candidate.get("matched_amount"))):
+            or candidate.get("date") != (entry["booking_date"] or "")[:10]):
         return None
     bank_reference = candidate.get("unique_reference")
     if (not isinstance(bank_reference, str) or not bank_reference.strip()
-            or bank_reference not in {entry.get("reference"), entry.get("entry_reference")}):
+            or bank_reference == statement.get('iban')
+            or bank_reference not in _verified_bank_references(entry)):
         return None
     direction = candidate["credit_debit"]
     if direction not in ("CRDT", "DBIT") or candidate.get("expense_matches"):
@@ -339,7 +384,8 @@ def _strict_invoice_candidate(connection, statement, entry):
     party_field = "customer" if direction == "CRDT" else "supplier"
     if (invoice.docstatus != 1 or invoice.company != connection.company
             or invoice.get(party_field) != candidate.get("party_match")
-            or _money(invoice.outstanding_amount) != amount
+            or _money(invoice.outstanding_amount) != _money(candidate.get('matched_amount'))
+            or _contract_discount(invoice, amount, candidate['date']) is None
             or invoice.currency != statement["currency"]):
         return None
     reference_text = candidate.get("transaction_reference") or ""
@@ -351,6 +397,68 @@ def _strict_invoice_candidate(connection, statement, entry):
     if not any(_reference_mentions(value, reference_text) for value in accepted):
         return None
     return candidate, doctype, invoice, amount
+
+
+def _discount_payment(invoice, doctype, candidate, statement, amount, download_name):
+    """Use ERPNext's own invoice/term/tax accounting, never an arbitrary write-off."""
+    from erpnext.accounts.doctype.payment_entry.payment_entry import (
+        get_payment_entry, split_early_payment_discount_loss)
+    company = frappe.get_doc('Company', invoice.company)
+    if (doctype != 'Sales Invoice' or company.default_currency != invoice.currency
+            or not company.default_discount_account
+            or get_site_config(cached=False).get('ebics_auto_discount_tax_split') is not True):
+        raise BankFileError('Automatic cash discount requires explicit tax/account configuration')
+    discount_account = frappe.get_doc('Account', company.default_discount_account)
+    if (discount_account.company != invoice.company or discount_account.disabled or discount_account.is_group
+            or discount_account.root_type != 'Income'):
+        raise BankFileError('Cash discount account does not match the company')
+    pe = get_payment_entry(doctype, invoice.name, bank_account=statement['account'],
+                           reference_date=candidate['date'])
+    # Keep native term allocation, but split the deduction for this EBICS payment
+    # without changing the global manual-payment accounting preference.
+    pe.set('deductions', [])
+    term = invoice.payment_schedule[0]
+    split_early_payment_discount_loss(pe, invoice, [{'type': term.discount_type, 'discount': term.discount}])
+    expected = _money(invoice.outstanding_amount) - amount
+    remainder = expected - sum(Decimal(str(d.amount)) for d in pe.deductions)
+    if abs(remainder) > Decimal('0.02'):
+        raise BankFileError('Native discount split does not explain the bank difference')
+    if remainder:
+        if not company.round_off_account:
+            raise BankFileError('Discount rounding account is missing')
+        pe.append('deductions', dict(account=company.round_off_account, cost_center=company.cost_center,
+                                     amount=float(remainder)))
+    pe.update(dict(posting_date=candidate['date'], reference_date=candidate['date'],
+                   reference_no=candidate['unique_reference'], paid_amount=float(amount), received_amount=float(amount),
+                   camt_amount=float(amount), remarks='EBICS {0}; contractual cash discount; {1}'.format(
+                       download_name, candidate.get('transaction_reference') or '')))
+    pe.set_amounts()
+    pe.insert()
+    if (pe.paid_to != statement['account'] or pe.paid_from != invoice.debit_to
+            or pe.payment_type != 'Receive' or pe.party_type != 'Customer'
+            or pe.paid_to_account_currency != invoice.currency or pe.paid_from_account_currency != invoice.currency
+            or str(pe.posting_date)[:10] != candidate['date'] or pe.reference_no != candidate['unique_reference']):
+        raise BankFileError('Native discount payment has unexpected accounts or bank identity')
+    return pe
+
+
+def _already_booked_entry(connection, statement, entry):
+    """A suppressed legacy candidate can also be a draft; only a posted cash match resolves it."""
+    amount = _money(entry['amount'])
+    if entry['issues'] or entry['detail_count'] > 1 or amount is None:
+        return False
+    refs = list(_verified_bank_references(entry) - {statement.get('iban')})
+    if not refs:
+        return False
+    incoming = entry['credit_debit'] == 'CRDT'
+    matches = frappe.get_all('Payment Entry', filters={
+        'company': connection.company, 'docstatus': 1, 'reference_no': ('in', refs),
+        'payment_type': 'Receive' if incoming else 'Pay',
+        'paid_to' if incoming else 'paid_from': statement['account'],
+        'posting_date': (entry['booking_date'] or '')[:10]},
+        fields=['paid_amount', 'received_amount', 'paid_from_account_currency', 'paid_to_account_currency'])
+    return len(matches) == 1 and all(_money(matches[0].get(k)) == amount for k in ('paid_amount', 'received_amount')) \
+        and all(matches[0].get(k) == statement['currency'] for k in ('paid_from_account_currency', 'paid_to_account_currency'))
 
 
 def _book_exact_match(connection, statement, entry, download_name):
@@ -380,8 +488,12 @@ def _book_exact_match(connection, statement, entry, download_name):
     savepoint = "ebics_booking_" + sha256(reference.encode()).hexdigest()[:20]
     frappe.db.savepoint(savepoint)
     try:
-        result = make_payment_entry(**payload)
-        payment = frappe.get_doc("Payment Entry", result["payment_entry"])
+        discount = _contract_discount(invoice, amount, candidate['date'])
+        if discount:
+            payment = _discount_payment(invoice, doctype, candidate, statement, amount, download_name)
+        else:
+            result = make_payment_entry(**payload)
+            payment = frappe.get_doc("Payment Entry", result["payment_entry"])
         references = payment.references or []
         if (payment.docstatus != 0 or payment.company != connection.company
                 or payment.party != candidate["party_match"]
@@ -389,10 +501,11 @@ def _book_exact_match(connection, statement, entry, download_name):
                 or _money(payment.received_amount) != amount
                 or Decimal(str(payment.difference_amount or 0)) != 0
                 or Decimal(str(payment.unallocated_amount or 0)) != 0
-                or payment.deductions or len(references) != 1
+                or (not discount and payment.deductions) or len(references) != 1
+                or (discount and sum(Decimal(str(d.amount)) for d in payment.deductions) != discount)
                 or references[0].reference_doctype != doctype
                 or references[0].reference_name != invoice.name
-                or _money(references[0].allocated_amount) != amount):
+                or _money(references[0].allocated_amount) != amount + discount):
             raise BankFileError("Candidate payment differs from the confirmed bank and invoice amount")
         payment.submit()
         frappe.db.commit()
@@ -422,6 +535,10 @@ def _process_download(connection, record):
     booked = review = 0
     for statement in preview["statements"]:
         for entry in statement["entries"]:
+            if (not entry['issues'] and not entry['candidates']
+                    and entry.get('suppressed_by_existing_matcher', 0) > 0
+                    and _already_booked_entry(connection, statement, entry)):
+                continue
             try:
                 if _book_exact_match(connection, statement, entry, record.name):
                     booked += 1
@@ -432,7 +549,7 @@ def _process_download(connection, record):
                 # block archiving the other bank entries. It stays visible for review.
                 review += 1
                 frappe.log_error(title="EBICS candidate requires review", message=type(error).__name__)
-    record.db_set({"booked_count": booked, "review_count": review,
+    record.db_set({"booked_count": int(record.booked_count or 0) + booked, "review_count": review,
                    "processing_state": "Review" if review else "Completed"}, commit=True)
     return {"booked": booked, "review": review}
 
@@ -449,8 +566,8 @@ def sync_connection(connection_name, debug=False):
         _statement_profile(connection)
         reader = _configured_reader(connection)
         waiting = frappe.get_all("EBICS Download", filters={"connection": connection.name,
-                                                          "ack_state": "Confirmed", "processing_state": "Pending"},
-                                 pluck="name", order_by="creation asc", limit_page_length=100)
+                                                          "ack_state": "Confirmed", "processing_state": ("in", ["Pending", "Review"])},
+                                 pluck="name", order_by="modified asc, creation asc", limit_page_length=100)
         for name in waiting:
             _process_download(connection, frappe.get_doc("EBICS Download", name))
         repeated_payloads = set()

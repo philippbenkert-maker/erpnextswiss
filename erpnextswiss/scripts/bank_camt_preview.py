@@ -72,6 +72,10 @@ def prepare_camt_archive(payload, profile):
                                 'reversal': _text(entry, 'RvslInd') in ('true', '1'),
                                 'reference': _text(entry, 'AcctSvcrRef'), 'entry_reference': _text(entry, 'NtryRef'),
                                 'detail_count': len(entry.findall('NtryDtls/TxDtls')),
+                                'bank_detail_references': [value for path in (
+                                    'NtryDtls/TxDtls/Refs/UETR', 'NtryDtls/TxDtls/Refs/AcctSvcrRef',
+                                    'NtryDtls/TxDtls/Refs/TxId', 'NtryDtls/TxDtls/Refs/PmtInfId')
+                                    for value in [entry.findtext(path)] if value],
                                 'xml': etree.tostring(entry, encoding='unicode')})
             balances = [{**_money(balance), 'type': _text(balance, 'Tp/CdOrPrtry/Cd'),
                          'proprietary_type': _text(balance, 'Tp/CdOrPrtry/Prtry'), 'date': _date(balance, 'Dt')}
