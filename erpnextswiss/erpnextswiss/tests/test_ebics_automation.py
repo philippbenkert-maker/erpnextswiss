@@ -352,7 +352,7 @@ class TestEbicsAutomation(TestCase):
 
         with (patch.object(automation.frappe, "cache"),
               patch.object(automation.frappe, "get_doc", return_value=connection),
-              patch.object(automation.frappe, "get_all", return_value=[]),
+              patch.object(automation.frappe, "get_all", return_value=[]) as waiting,
               patch.object(automation.frappe.utils, "getdate", return_value=date(2026, 9, 29)),
               patch.object(automation, "_pending_receipt", return_value=None),
               patch.object(automation, "_known_files", return_value={}),
@@ -360,6 +360,8 @@ class TestEbicsAutomation(TestCase):
               patch.object(automation, "_process_download") as process):
             result = automation.sync_connection("AKB")
         self.assertEqual(result, {"status": "ok", "downloads_fetched": 2})
+        self.assertEqual(waiting.call_args.kwargs['order_by'], 'modified asc, creation asc')
+        self.assertEqual(waiting.call_args.kwargs['filters']['processing_state'], ('in', ['Pending', 'Review']))
         self.assertEqual(download.call_count, 3)
         self.assertTrue(all(call.args[:2] == (connection, date(2026, 9, 29))
                             for call in download.call_args_list))

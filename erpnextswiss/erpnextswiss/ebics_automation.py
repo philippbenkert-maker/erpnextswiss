@@ -567,7 +567,7 @@ def sync_connection(connection_name, debug=False):
         reader = _configured_reader(connection)
         waiting = frappe.get_all("EBICS Download", filters={"connection": connection.name,
                                                           "ack_state": "Confirmed", "processing_state": ("in", ["Pending", "Review"])},
-                                 pluck="name", order_by="creation asc", limit_page_length=100)
+                                 pluck="name", order_by="modified asc, creation asc", limit_page_length=100)
         for name in waiting:
             _process_download(connection, frappe.get_doc("EBICS Download", name))
         repeated_payloads = set()
