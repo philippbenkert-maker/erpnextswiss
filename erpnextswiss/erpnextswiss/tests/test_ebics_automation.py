@@ -237,7 +237,7 @@ class TestEbicsAutomation(TestCase):
         pending = MagicMock(requested_date="2026-09-28")
         events = []
         with (patch.object(automation, "_pending_receipt", return_value=pending),
-              patch.object(automation, "_acknowledge", side_effect=lambda c, d: events.append("ack"))):
+              patch.object(automation, "_acknowledge", side_effect=lambda c, d, **kw: events.append("ack"))):
             automation._download_pending(connection, date(2026, 9, 29))
         self.assertEqual(events, ["ack"])
         connection.get_client.assert_not_called()
@@ -264,6 +264,79 @@ class TestEbicsAutomation(TestCase):
         self.assertEqual(len(connection.get_client.return_value.BTD.call_args.args), 1)
         connection.save.assert_not_called()
         connection.get_client.return_value.confirm_download.assert_not_called()
+
+    def test_python_reader_commits_and_reads_back_before_bank_receipt(self):
+        events = []
+        connection = MagicMock(name="AKB")
+        connection.name = "AKB"
+        connection.scope, connection.statement_btf_version = "CH", "08"
+        record = MagicMock()
+        record.name, record.bank_transaction_id = "EBICS-TEST", "A" * 32
+        record.insert.return_value = record
+        archive = automation._zip_from_receipt(automation._archive_bytes({"bank.xml": xml()}))
+        def download(persist):
+            persist(record.bank_transaction_id, archive)
+            events.append("bank_ack")
+            return record.bank_transaction_id
+        reader = MagicMock()
+        reader.download.side_effect = download
+        record.db_set.side_effect = lambda *a, **kw: events.append("confirmed")
+        with (patch.object(automation.frappe, "get_doc", return_value=record),
+              patch.object(automation.frappe.db, "exists", return_value=False),
+              patch.object(automation.frappe.db, "commit", side_effect=lambda: events.append("commit")),
+              patch.object(automation, "_preview", return_value={}),
+              patch.object(automation, "_verify_receipt", side_effect=lambda doc: events.append("readback"))):
+            self.assertIs(automation._download_python(connection, date(2026, 11, 6), {}, reader), record)
+        self.assertEqual(events, ["commit", "readback", "bank_ack", "confirmed"])
+        connection.get_client.assert_not_called()
+
+    def test_python_reader_failed_bank_reply_leaves_receipt_pending(self):
+        connection = MagicMock(scope="CH", statement_btf_version="08")
+        connection.name = "AKB"
+        record = MagicMock()
+        record.insert.return_value = record
+        archive = automation._zip_from_receipt(automation._archive_bytes({"bank.xml": xml()}))
+        def download(persist):
+            persist("A" * 32, archive)
+            raise BankFileError("lost reply")
+        reader = MagicMock()
+        reader.download.side_effect = download
+        with (patch.object(automation.frappe, "get_doc", return_value=record),
+              patch.object(automation.frappe.db, "exists", return_value=False),
+              patch.object(automation, "_preview", return_value={}),
+              patch.object(automation, "_verify_receipt")):
+            with self.assertRaises(BankFileError):
+                automation._download_python(connection, date(2026, 11, 6), {}, reader)
+        record.db_set.assert_not_called()
+
+    def test_python_reader_rejects_no_data_after_persistence(self):
+        connection = MagicMock(scope="CH", statement_btf_version="08")
+        connection.name = "AKB"
+        record = MagicMock()
+        record.insert.return_value = record
+        archive = automation._zip_from_receipt(automation._archive_bytes({"bank.xml": xml()}))
+        reader = MagicMock()
+        reader.download.side_effect = lambda persist: (persist("A" * 32, archive), None)[1]
+        with (patch.object(automation.frappe, "get_doc", return_value=record),
+              patch.object(automation.frappe.db, "exists", return_value=False),
+              patch.object(automation, "_preview", return_value={}),
+              patch.object(automation, "_verify_receipt")):
+            with self.assertRaises(BankFileError):
+                automation._download_python(connection, date(2026, 11, 6), {}, reader)
+        record.db_set.assert_not_called()
+
+    def test_python_reader_refuses_malformed_archive_before_storage(self):
+        connection = MagicMock(scope="CH", statement_btf_version="08")
+        reader = MagicMock()
+        reader.download.side_effect = lambda persist: persist("A" * 32, b"not zip")
+        with patch.object(automation.frappe, "get_doc") as get_doc:
+            with self.assertRaises(BankFileError):
+                automation._download_python(connection, date(2026, 11, 6), {}, reader)
+        get_doc.assert_not_called()
+
+    def test_unknown_provider_is_not_silently_downgraded(self):
+        with patch.object(automation, "get_site_config", return_value={"ebics_statement_reader": "typo"}):
+            with self.assertRaises(BankFileError): automation._configured_reader(MagicMock())
 
     def test_current_sync_fetches_multiple_bank_files_for_same_day(self):
         connection = MagicMock()

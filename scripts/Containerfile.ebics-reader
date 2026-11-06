@@ -1,0 +1,13 @@
+# Narrow overlay: all unrelated app/runtime files are inherited unchanged.
+# Build only from an immutable base image ID and an exact git archive context.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG SOURCE_COMMIT
+USER root
+RUN rm -rf /home/frappe/frappe-bench/apps/erpnextswiss /opt/frappe/local_apps/erpnextswiss
+COPY app /home/frappe/frappe-bench/apps/erpnextswiss
+RUN chown -R "$(id -u frappe):$(id -g frappe)" /home/frappe/frappe-bench/apps/erpnextswiss
+USER frappe
+WORKDIR /home/frappe/frappe-bench
+RUN ./env/bin/python -m pip install --no-cache-dir -e apps/erpnextswiss && ./env/bin/python -m pip check
+LABEL ch.ktwaerme.erpnextswiss.commit=${SOURCE_COMMIT}
