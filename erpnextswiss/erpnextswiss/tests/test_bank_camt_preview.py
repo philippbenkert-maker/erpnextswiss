@@ -46,6 +46,11 @@ def entry_from(content):
 
 
 class TestBankCamtPreview(unittest.TestCase):
+    def test_transaction_reference_evidence_is_not_remittance_text(self):
+        entry = entry_from(detailed_xml(reference='BANK-DETAIL', remark='FAKE-REFERENCE'))
+        self.assertEqual(entry['bank_detail_references'], ['BANK-DETAIL-0'])
+        self.assertNotIn('FAKE-REFERENCE', entry['bank_detail_references'])
+
     def test_both_profiles_keep_each_file_statement_and_original(self):
         for profile in PROFILES:
             content = xml(profile, multiple=True, entries=True)
