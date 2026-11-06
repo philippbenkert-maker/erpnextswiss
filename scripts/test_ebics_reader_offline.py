@@ -2,6 +2,7 @@
 import socket
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import fintech
@@ -9,6 +10,7 @@ import frappe
 
 fintech.register()
 with tempfile.TemporaryDirectory(prefix="ebics-tests-") as directory:
+    (Path(directory) / "test.invalid").mkdir()
     frappe.init(site="test.invalid", sites_path=directory, force=True)
     frappe.local.db = MagicMock()
     try:
