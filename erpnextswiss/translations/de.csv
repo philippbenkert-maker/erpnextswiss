@@ -40,7 +40,7 @@ Revenue,Umsatz,DocType: VAT Declaration
 Get values,Werte holen,DocType: VAT Declaration
 Recalculate,Neu berechnen,DocType: VAT Declaration
 Total revenue (200),"Total der vereinbarten bzw. vereinnahmten Entgelte (Art. 39), inkl. Entgelte aus Übertragungen im Meldeverfahren sowie aus Leistungen im Ausland (200)",DocType: VAT Declaration
-Non-taxable revenue (205),Nicht steuerpflichtige Umsätze (205),DocType: VAT Declaration
+Non-taxable revenue (205),In Ziffer 200 enthaltene optierte Umsätze (205),DocType: VAT Declaration
 Tax-free services (220),"Von der Steuer befreite Leistungen (u.a. Exporte; Art. 23), von der Steuer befreite Leistungen an begünstigte Einrichtungen und Personen (220)",DocType: VAT Declaration
 Revenue abroad (221),Leistungen im Ausland (221),DocType: VAT Declaration
 Transfers (225),"Übertragung im Meldeverfahren (Art. 38, bitte zusätzlich Form. 764 einreichen) (225)",DocType: VAT Declaration
@@ -1111,3 +1111,50 @@ ZUGFeRD Settings,ZUGFeRD-Einstellungen,Module: ERPNextSwiss
 Worldline TIM,Worldline TIM,Module: ERPNextSwiss
 YTD,laufendes Jahr,Module: ERPNextSwiss
 YTD %,laufendes Jahr %,Module: ERPNextSwiss
+Opted turnover included in 200 (205),In Ziffer 200 enthaltene optierte Umsätze (205),DocType: VAT Declaration
+Net payable tax (negative = credit),Netto-Steuerbetrag (Minus = Guthaben),DocType: VAT Declaration
+VAT credit,MWST-Guthaben,DocType: VAT Declaration
+XML and filing evidence,XML und Einreichungsnachweis,DocType: VAT Declaration
+Filing status,Einreichungsstatus,DocType: VAT Declaration
+XML ready,XML bereit,DocType: VAT Declaration
+Filed (user confirmed),Eingereicht (vom Benutzer bestätigt),DocType: VAT Declaration
+Original XML,Original-XML,DocType: VAT Declaration
+XML checksum (SHA-256),XML-Prüfsumme (SHA-256),DocType: VAT Declaration
+XML generated at,XML erstellt am,DocType: VAT Declaration
+Existing closing entry,Bestehende Abschlussbuchung,DocType: VAT Declaration
+Archive source,Archivquelle,DocType: VAT Declaration
+Existing XML,Bestehende XML,DocType: VAT Declaration
+ERP export,ERP-Export,DocType: VAT Declaration
+Filing confirmed by,Einreichung bestätigt durch,DocType: VAT Declaration
+Filing confirmed at,Einreichung bestätigt am,DocType: VAT Declaration
+Actual external filing date,Tatsächliches Einreichungsdatum,DocType: VAT Declaration
+Filing evidence,Einreichungsnachweis,DocType: VAT Declaration
+Existing submission receipt,Bestehende Einreichungsbestätigung,DocType: VAT Declaration
+Swiss XML options,Optionen für Schweizer XML,DocType: VAT Declaration
+Submission type,Meldungsart,DocType: VAT Declaration
+Reporting basis,Abrechnungsart,DocType: VAT Declaration
+Business reference,Geschäftsreferenz,DocType: VAT Declaration
+Corrects declaration,Korrigiert Abrechnung,DocType: VAT Declaration
+Description of other deductions (280),Beschreibung übrige Abzüge (280),DocType: VAT Declaration
+Link existing XML and closing entry,Bestehende XML mit Abschlussbuchung verknüpfen,DocType: VAT Declaration
+Original XML attachment,Original-XML-Anhang,DocType: VAT Declaration
+Already filed externally,Bereits extern eingereicht,DocType: VAT Declaration
+Check original XML,Original-XML prüfen,DocType: VAT Declaration
+Link checked XML,Geprüfte XML verknüpfen,DocType: VAT Declaration
+Download original XML,Original-XML herunterladen,DocType: VAT Declaration
+Record external filing,Erfolgte Einreichung erfassen,DocType: VAT Declaration
+Basis of filing confirmation,Grundlage der Einreichungsbestätigung,DocType: VAT Declaration
+Blank if the actual upload date is unknown.,"Leer lassen, wenn das tatsächliche Hochladedatum unbekannt ist.",DocType: VAT Declaration
+Confirm completed filing,Erfolgte Einreichung bestätigen,DocType: VAT Declaration
+Retrieving accounting amounts…,Buchungswerte werden abgerufen…,DocType: VAT Declaration
+This records an upload already completed in the ESTV portal. No data is sent to the ESTV.,Hier wird ein bereits erfolgtes Hochladen im ESTV-Portal dokumentiert. Es werden keine Daten an die ESTV gesendet.,DocType: VAT Declaration
+External filing confirmed. Original XML and closing entry are preserved. Downloading does not file again.,Einreichung bestätigt. Original-XML und Abschlussbuchung bleiben erhalten. Ein Download reicht nichts erneut ein.,DocType: VAT Declaration
+XML archived. Upload this file to the ESTV portal and then record the external filing here.,XML archiviert. Laden Sie diese Datei im ESTV-Portal hoch und erfassen Sie anschliessend hier die erfolgte Einreichung.,DocType: VAT Declaration
+"Check period, accounting amounts and reporting basis. Submit validates and archives the Swiss XML; it does not post or file anything.","Periode, Buchungswerte und Abrechnungsart prüfen. Beim Bestätigen wird die Schweizer XML geprüft und archiviert; es erfolgt keine Buchung und keine Einreichung.",DocType: VAT Declaration
+Record who confirmed the filing or attach the existing receipt after linking. No submission is sent.,"Erfassen Sie, wer die Einreichung bestätigt hat, oder fügen Sie nach dem Verknüpfen die vorhandene Bestätigung bei. Es erfolgt keine Einreichung.",DocType: VAT Declaration
+VAT query {0} is missing. Configure it before retrieving amounts; no fields were changed.,Die MWST-Buchungsabfrage {0} fehlt. Vor dem Abruf muss sie eingerichtet werden. Es wurden keine Werte geändert.,DocType: VAT Declaration
+Record the basis for confirming the external filing.,Bitte die Grundlage der Bestätigung der erfolgten Einreichung erfassen.,DocType: VAT Declaration
+An original VAT declaration already exists for this period. Open it or create an explicit correction.,Für diese Periode besteht bereits eine ursprüngliche MWST-Abrechnung. Öffnen Sie diese oder erstellen Sie ausdrücklich eine Korrektur.,DocType: VAT Declaration
+An archived VAT declaration is preserved. Create a correction instead.,Archivierte MWST-Abrechnungen bleiben erhalten. Erstellen Sie eine Korrektur.,DocType: VAT Declaration
+Select company and period first.,Bitte zuerst Firma und Periode wählen.,DocType: VAT Declaration
+XML validation failed: {0},XML-Prüfung fehlgeschlagen: {0},DocType: VAT Declaration

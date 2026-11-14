@@ -12,10 +12,29 @@
   "column_break_1",
   "vat_type",
   "letter_head",
+  "section_filing",
+  "filing_status",
+  "xml_file",
+  "xml_sha256",
+  "xml_generated_at",
+  "linked_journal_entry",
+  "archive_source",
+  "filing_column",
+  "filing_confirmed_by",
+  "filing_confirmed_at",
+  "filed_on",
+  "filing_evidence",
+  "submission_receipt",
   "section_break_period",
   "start_date",
   "column_break_2",
   "end_date",
+  "section_xml_options",
+  "submission_type",
+  "reporting_basis",
+  "business_reference",
+  "corrects_declaration",
+  "period_key",
   "section_revenue",
   "total_revenue",
   "non_taxable_revenue",
@@ -26,6 +45,7 @@
   "non_taxable_services",
   "losses",
   "misc",
+  "misc_description",
   "total_deductions",
   "taxable_revenue",
   "section_tax_calculation",
@@ -88,7 +108,8 @@
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Title",
-   "unique": 1
+   "unique": 1,
+   "reqd": 1
   },
   {
    "fieldname": "column_break_1",
@@ -98,7 +119,9 @@
    "fieldname": "vat_type",
    "fieldtype": "Select",
    "label": "VAT type",
-   "options": "effective\nflat"
+   "options": "effective\nflat",
+   "reqd": 1,
+   "default": "effective"
   },
   {
    "fieldname": "section_break_period",
@@ -109,7 +132,8 @@
    "fieldname": "start_date",
    "fieldtype": "Date",
    "in_list_view": 1,
-   "label": "Start"
+   "label": "Start",
+   "reqd": 1
   },
   {
    "fieldname": "column_break_2",
@@ -119,7 +143,8 @@
    "fieldname": "end_date",
    "fieldtype": "Date",
    "in_list_view": 1,
-   "label": "End"
+   "label": "End",
+   "reqd": 1
   },
   {
    "fieldname": "section_revenue",
@@ -137,7 +162,7 @@
    "depends_on": "eval:doc.vat_type == 'effective'",
    "fieldname": "non_taxable_revenue",
    "fieldtype": "Float",
-   "label": "Non-taxable revenue (205)",
+   "label": "Opted turnover included in (200) - (205)",
    "precision": "2"
   },
   {
@@ -264,7 +289,7 @@
    "label": "Reduced rate (%)"
   },
   {
-   "default": "3.8",
+   "default": "3.7",
    "depends_on": "eval:doc.vat_type == 'effective'",
    "fieldname": "lodging_rate",
    "fieldtype": "Percent",
@@ -330,7 +355,8 @@
    "fieldname": "additional_tax",
    "fieldtype": "Float",
    "label": "Additional tax (380)",
-   "precision": "2"
+   "precision": "2",
+   "read_only": 1
   },
   {
    "fieldname": "section_summary",
@@ -342,7 +368,8 @@
    "fieldname": "total_tax",
    "fieldtype": "Float",
    "label": "Total tax (399)",
-   "precision": "2"
+   "precision": "2",
+   "read_only": 1
   },
   {
    "depends_on": "eval:doc.vat_type == 'effective'",
@@ -406,15 +433,17 @@
    "bold": 1,
    "fieldname": "payable_tax",
    "fieldtype": "Float",
-   "label": "Payable tax (500)",
+   "label": "Net payable tax (negative = credit)",
    "precision": "2",
    "read_only": 1
   },
   {
    "fieldname": "balance",
    "fieldtype": "Float",
-   "label": "Balance (510)",
-   "precision": "2"
+   "label": "VAT credit",
+   "precision": "2",
+   "description": "Informational only; this declaration never creates accounting entries.",
+   "read_only": 1
   },
   {
    "fieldname": "section_other_cashflows",
@@ -562,7 +591,8 @@
    "fieldname": "additional_tax_2024",
    "fieldtype": "Float",
    "label": "Additional tax (380)",
-   "precision": "2"
+   "precision": "2",
+   "read_only": 1
   },
   {
    "depends_on": "eval:doc.vat_type == 'flat'",
@@ -585,10 +615,169 @@
    "fieldtype": "Float",
    "label": "Additional (383)",
    "precision": "2"
+  },
+  {
+   "fieldname": "section_filing",
+   "fieldtype": "Section Break",
+   "label": "XML archive and external filing"
+  },
+  {
+   "fieldname": "filing_status",
+   "fieldtype": "Select",
+   "label": "Filing status",
+   "options": "Draft\nXML ready\nFiled (user confirmed)",
+   "default": "Draft",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "in_list_view": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "xml_file",
+   "fieldtype": "Attach",
+   "label": "Original Swiss XML",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "xml_sha256",
+   "fieldtype": "Data",
+   "label": "XML SHA-256",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "unique": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "xml_generated_at",
+   "fieldtype": "Datetime",
+   "label": "XML generated at",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "linked_journal_entry",
+   "fieldtype": "Link",
+   "label": "Existing VAT closing entry",
+   "options": "Journal Entry",
+   "in_list_view": 1,
+   "description": "Link the existing submitted closing entry. This form never posts an entry.",
+   "no_copy": 1
+  },
+  {
+   "fieldname": "archive_source",
+   "fieldtype": "Select",
+   "label": "Archive source",
+   "options": "\nExisting XML\nERP export",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "filing_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "filing_confirmed_by",
+   "fieldtype": "Link",
+   "label": "Filing confirmed by",
+   "options": "User",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "filing_confirmed_at",
+   "fieldtype": "Datetime",
+   "label": "Confirmation recorded at",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "filed_on",
+   "fieldtype": "Date",
+   "label": "Actual external filing date",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "description": "Blank if the actual upload date is unknown.",
+   "no_copy": 1
+  },
+  {
+   "fieldname": "filing_evidence",
+   "fieldtype": "Small Text",
+   "label": "Basis of filing confirmation",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "submission_receipt",
+   "fieldtype": "Attach",
+   "label": "ESTV receipt",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "section_xml_options",
+   "fieldtype": "Section Break",
+   "label": "Swiss XML settings"
+  },
+  {
+   "fieldname": "submission_type",
+   "fieldtype": "Select",
+   "label": "Submission type",
+   "options": "1\n2\n3",
+   "default": "1",
+   "description": "1 = original; 2 = correction; 3 = annual reconciliation.",
+   "no_copy": 0
+  },
+  {
+   "fieldname": "reporting_basis",
+   "fieldtype": "Select",
+   "label": "Reporting basis",
+   "options": "1\n2",
+   "default": "1",
+   "description": "1 = agreed consideration; 2 = received consideration.",
+   "no_copy": 0
+  },
+  {
+   "fieldname": "business_reference",
+   "fieldtype": "Data",
+   "label": "Business reference",
+   "no_copy": 1
+  },
+  {
+   "fieldname": "corrects_declaration",
+   "fieldtype": "Link",
+   "label": "Corrects declaration",
+   "options": "VAT Declaration",
+   "depends_on": "eval:doc.submission_type == '2'",
+   "no_copy": 1
+  },
+  {
+   "fieldname": "period_key",
+   "fieldtype": "Data",
+   "label": "Period key",
+   "hidden": 1,
+   "read_only": 1,
+   "unique": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "misc_description",
+   "fieldtype": "Data",
+   "label": "Description of other deductions (280)",
+   "depends_on": "eval:!!doc.misc",
+   "length": 50,
+   "no_copy": 1
   }
  ],
  "is_submittable": 1,
- "modified": "2023-12-27 21:06:53.191523",
+ "modified": "2026-11-14 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "ERPNextSwiss",
  "name": "VAT Declaration",
@@ -632,8 +821,9 @@
    "write": 1
   }
  ],
- "sort_field": "modified",
+ "sort_field": "end_date",
  "sort_order": "DESC",
  "title_field": "title",
- "track_changes": 1
+ "track_changes": 1,
+ "search_fields": "title,company,linked_journal_entry,filing_status"
 }
