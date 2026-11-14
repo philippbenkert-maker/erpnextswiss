@@ -288,6 +288,24 @@ class TestBankMatchingNative(unittest.TestCase):
                 self.assertEqual(result['transactions'][0]['invoice_matches'], [self.invoice_a])
                 self.assertIn('&lt;Bank&gt;', result['html'])
 
+    def test_bank_preview_escapes_all_text_and_attribute_fields_without_mutating_data(self):
+        from copy import deepcopy
+        transaction = dict(txid='0" onclick="alert(1)', date='2026-09-12',
+                           credit_debit='CRDT', currency='<svg onload="alert(2)">', amount=12.34,
+                           party_name='<img src=x onerror="alert(3)">',
+                           party_address='Address <script>alert(4)</script>',
+                           transaction_reference='Reference <iframe src="//example.invalid">',
+                           matched_amount=12.34, invoice_matches=['synthetic'], party_match='synthetic')
+        before = deepcopy(transaction)
+        html = bank_wizard.render_transactions([transaction])
+        self.assertEqual(transaction, before)
+        for tag in ('<svg', '<img', '<script', '<iframe'):
+            self.assertNotIn(tag, html)
+        self.assertNotIn('id="row-transaction-0" onclick=', html)
+        self.assertIn('&lt;img', html)
+        self.assertIn('&lt;script&gt;', html)
+        self.assertIn('btn-close-sinv-', html)
+
     def test_manual_rejects_late_foreign_account_without_partial_render(self):
         other = xml().replace(b'CH9300762011623852957', b'CH5604835012345678009')
         for payload in (zipped([('first.xml', detailed_xml()), ('other.xml', other)]),

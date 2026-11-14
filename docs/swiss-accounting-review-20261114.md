@@ -107,9 +107,13 @@ Zahlungsverknüpfungen können nicht durch erneutes Parsen ersetzt werden. Der
 Parser führt keinen eigenen Commit aus. Historische Buchungen werden nicht
 umgeschrieben und kein Bankauftrag wird übertragen.
 
-Abnahme: 143 bestehende Python-Tests, 40 CAMT-Datei-/Vorschautests, 17 Node-Prüfungen
+Abnahme: 145 Python-Tests, 40 CAMT-Datei-/Vorschautests, 17 Node-Prüfungen
 und die Prüfung aller mutierenden Schnittstellen. Zusätzlich verlangt der Release
 `scripts/bank_import_native_check.py` auf einer vollständigen isolierten
 Produktivwiederherstellung, die bestehenden MWST-/Zahlungsabnahmen sowie den
 unveränderten Buchhaltungsfingerabdruck. Diese technische Abnahme ersetzt keine
 bankseitige Freigabe eines EBICS-Transportwegs.
+
+Die native Abnahme prüft zusätzlich, dass Banknamen, Adressen und Referenzen
+als wörtlicher Text erscheinen. Die Tabellenvorlage erzwingt HTML-Escaping auch
+bei abgeschaltetem globalem Autoescape; Eingabedaten und Abgleich bleiben unverändert.
