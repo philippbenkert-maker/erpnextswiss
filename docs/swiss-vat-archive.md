@@ -90,3 +90,10 @@ GL allocation and XML/audit reconciliation, automatic refresh at submission,
 permissions and unsupported-method failures. Hashes cover all account, ledger,
 journal, invoice, invoice-tax and payment tables before/after. All test setup,
 future templates and draft declarations are rolled back; original XML stays exact.
+
+The shared ERPNext child table `Purchase Taxes and Charges` contains both invoice
+rows and future-template rows. Release integrity hashes cover every non-template
+row, including all posted invoice taxes. Separate whole-table snapshots protect
+all purchase tax templates: only the account/tax-code changes from the exact
+reviewed preview plus their Frappe save timestamps may change. Added/deleted rows,
+rate changes or changes to any other template fail acceptance.

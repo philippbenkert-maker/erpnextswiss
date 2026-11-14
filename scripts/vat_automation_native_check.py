@@ -5,7 +5,6 @@ Private case JSON supplies the reviewed company, periods and expected accounting
 amounts. No test fixture/customer data or filing is embedded in this script.
 """
 import argparse
-import hashlib
 import json
 import os
 from decimal import Decimal
@@ -18,14 +17,7 @@ from erpnextswiss.erpnextswiss.doctype.vat_declaration.vat_declaration import ge
 from erpnextswiss.erpnextswiss.report.kontrolle_mwst.kontrolle_mwst import get_data
 
 
-def accounting_digest():
-    tables = ('Account', 'Journal Entry', 'Journal Entry Account', 'GL Entry',
-              'Sales Invoice', 'Sales Invoice Item', 'Sales Taxes and Charges',
-              'Purchase Invoice', 'Purchase Invoice Item', 'Purchase Taxes and Charges',
-              'Payment Entry', 'Payment Entry Reference', 'Payment Entry Deduction')
-    return {table: hashlib.sha256(json.dumps(frappe.db.sql(
-        f'SELECT * FROM `tab{table}` ORDER BY name', as_dict=True),
-        sort_keys=True, default=str).encode()).hexdigest() for table in tables}
+from vat_accounting_integrity import accounting_digest, template_snapshot, verify_template_changes
 
 
 def main():
@@ -42,6 +34,7 @@ def main():
     company = cases['company']
     checks = []
     before = accounting_digest()
+    templates_before = template_snapshot()
     historical = {d.name: (d.as_dict(), checked_xml(d)) for d in
         [frappe.get_doc('VAT Declaration', name) for name in cases.get('originals', [])]}
     counts = {table: frappe.db.count(table) for table in ('VAT Declaration', 'Swiss VAT Settings', 'File')}
@@ -65,6 +58,11 @@ def main():
         check(accounting_digest() == before, 'preview preserves every accounting table')
         setup = configure_company(company, apply=True)
         check(setup['applied'], 'reviewed company mapping configured')
+        check(setup['future_template_changes'] == preview['future_template_changes'], 'applied template changes exactly match reviewed preview')
+        template_evidence = verify_template_changes(templates_before, template_snapshot(), preview['future_template_changes'])
+        check(bool(template_evidence), 'only reviewed future template fields and save timestamps changed')
+        print('TEMPLATE_CHANGE_EVIDENCE ' + json.dumps(template_evidence, default=str), flush=True)
+        check(accounting_digest() == before, 'setup leaves all existing accounting rows unchanged')
         second = configure_company(company, apply=True)
         check(second['existing_mapping_preserved'] and not second['future_template_changes'], 'repeated setup is idempotent')
         settings = frappe.get_doc('Swiss VAT Settings', company)
@@ -113,10 +111,12 @@ def main():
         for name, (snapshot, raw) in historical.items():
             current = frappe.get_doc('VAT Declaration', name)
             check(current.as_dict() == snapshot and checked_xml(current) == raw, 'filed original and exact XML unchanged: ' + name)
-        check(accounting_digest() == before, 'all accounts, GL, journals, invoices, taxes and payments unchanged')
+        verify_template_changes(templates_before, template_snapshot(), preview['future_template_changes'])
+        check(accounting_digest() == before, 'all accounts, GL, journals, invoices, invoice taxes and payments unchanged')
     finally:
         frappe.set_user('Administrator'); frappe.db.rollback(save_point='vat_automation_acceptance')
         assert accounting_digest() == before
+        assert template_snapshot() == templates_before
         assert all(frappe.db.count(table) == count for table, count in counts.items())
         frappe.db.rollback(); frappe.destroy()
     print(json.dumps({'status': 'PASS', 'checks': len(checks), 'accounting_unchanged': True, 'all_test_changes_rolled_back': True}))
