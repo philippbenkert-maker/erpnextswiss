@@ -76,7 +76,7 @@ def main():
 
         def new_declaration(**updates):
             return frappe.get_doc(dict(doctype='VAT Declaration', title='VAT isolated acceptance 2097', company=company,
-                start_date='2097-01-01', end_date='2097-03-31', vat_type='effective',
+                start_date='2097-01-01', end_date='2097-03-31', vat_type='effective', auto_from_ledger=0,
                 total_revenue=1000, normal_amount_2024=1000, normal_rate_2024=8.1, pretax_material=10, **updates))
 
         new = new_declaration(); new.insert(); new.submit()

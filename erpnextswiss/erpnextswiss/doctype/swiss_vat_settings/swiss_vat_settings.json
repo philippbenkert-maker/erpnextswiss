@@ -1,0 +1,96 @@
+{
+ "doctype": "DocType",
+ "name": "Swiss VAT Settings",
+ "module": "ERPNextSwiss",
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "enabled",
+  "vat_type",
+  "reporting_basis",
+  "tax_tolerance",
+  "mapping_info",
+  "accounts"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Gesellschaft",
+   "options": "Company",
+   "reqd": 1,
+   "unique": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Automatische Zuordnung aktiv",
+   "default": 1
+  },
+  {
+   "fieldname": "vat_type",
+   "fieldtype": "Select",
+   "label": "Abrechnungsmethode",
+   "options": "effective",
+   "default": "effective",
+   "reqd": 1,
+   "description": "Automatisch: effektive Methode nach vereinbarten Entgelten."
+  },
+  {
+   "fieldname": "reporting_basis",
+   "fieldtype": "Select",
+   "label": "Abrechnungsart (1 = vereinbarte Entgelte)",
+   "options": "1",
+   "default": "1",
+   "reqd": 1
+  },
+  {
+   "fieldname": "tax_tolerance",
+   "fieldtype": "Currency",
+   "label": "Zulässige Rundungsdifferenz Umsatzsteuer (CHF)",
+   "default": "0.05",
+   "precision": "2",
+   "description": "Grössere Differenzen stoppen den Werteabruf und müssen über die Zuordnung geklärt werden."
+  },
+  {
+   "fieldname": "mapping_info",
+   "fieldtype": "HTML",
+   "label": "Hinweis",
+   "options": "<p>Die Zuordnung liest ausschliesslich gebuchte CHF-Hauptbuchwerte. Sie erzeugt oder verändert keine Buchungen. Abschlusskonten verhindern das erneute Einrechnen der MWST-Abschlüsse. Noch nicht zugeordnete Erlös- und Steuerkonten werden gemeldet.</p><p>Turnover = Umsatz; Reduction = Entgeltsminderung; Input tax = Vorsteuer; Output tax = Umsatzsteuerkontrolle; Settlement = MWST-Abrechnungskonto; Excluded = ausdrücklich ausgenommen; Other funds = Mittelflüsse 900/910; Acquisition tax = separates Bezugsteuerkonto.</p>"
+  },
+  {
+   "fieldname": "accounts",
+   "fieldtype": "Table",
+   "label": "Konten und MWST-Ziffern",
+   "options": "Swiss VAT Account Mapping",
+   "reqd": 1
+  }
+ ],
+ "track_changes": 1,
+ "autoname": "field:company",
+ "title_field": "company",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "report": 1,
+   "export": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "report": 1,
+   "export": 1
+  },
+  {
+   "role": "Accounts User",
+   "read": 1,
+   "report": 1
+  }
+ ]
+}

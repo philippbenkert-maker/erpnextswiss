@@ -1,64 +1,53 @@
-# Copyright (c) 2016-2024, libracore and contributors
-# For license information, please see license.txt
-
-from __future__ import unicode_literals
+"""Swiss VAT audit: the same allocation and bound period/company as 'Get values'."""
+import re
 import frappe
 from frappe import _
+from erpnextswiss.vat_ledger import BOX_FIELDS, INPUTS
+from erpnextswiss.vat_automation import check_read, is_configured, get_report
+from erpnextswiss.vat_xml import period
+
 
 def execute(filters=None):
-    columns, data = [], []
-    
-    if not filters.from_date:
-        filters.from_date = "2000-01-01"
-    if not filters.end_date:
-        filters.end_date = "2999-12-31"
-    if not filters.code:
-        filters.code = "200"
-
-    # define columns
+    filters = frappe._dict(filters or {})
     columns = [
-        {"label": _("Document"), "fieldname": "name", "fieldtype": "Dynamic Link", "options": "doctype", "width": 120},
-        {"label": _("Date"), "fieldname": "posting_date", "fieldtype": "Date", "width": 100},
-        {"label": _("Total"), "fieldname": "base_grand_total", "fieldtype": "Currency", "width": 100},
-        {"label": _("Taxes and Charges"), "fieldname": "taxes_and_charges", "fieldtype": "Data", "width": 150},
-        {"label": _("Tax Amount"), "fieldname": "total_taxes_and_charges", "fieldtype": "Currency", "width": 100},
-        {"label": _("Remarks"), "fieldname": "remarks", "fieldtype": "Data", "width": 150}
+        {'label': _('Document'), 'fieldname': 'name', 'fieldtype': 'Dynamic Link', 'options': 'doctype', 'width': 190},
+        {'label': _('Date'), 'fieldname': 'posting_date', 'fieldtype': 'Date', 'width': 110},
+        {'label': _('Account'), 'fieldname': 'account', 'fieldtype': 'Link', 'options': 'Account', 'width': 260},
+        {'label': _('Code'), 'fieldname': 'box', 'fieldtype': 'Data', 'width': 80},
+        {'label': _('Total'), 'fieldname': 'base_grand_total', 'fieldtype': 'Currency', 'width': 130},
+        {'label': _('Tax Amount'), 'fieldname': 'total_taxes_and_charges', 'fieldtype': 'Currency', 'width': 130},
+        {'label': _('Remarks'), 'fieldname': 'remarks', 'fieldtype': 'Data', 'width': 290},
     ]
-
-    data = get_data(filters.from_date, filters.end_date, filters.code, filters.company)
+    data = get_data(filters.from_date, filters.end_date, filters.code or '200', filters.company)
     return columns, data
 
-def get_data(from_date, end_date, code, company="%"):
-    # try to fetch data from VAT query
-    if frappe.db.exists("VAT query", "viewVAT_{code}".format(code=code)):
-        sql_query = ("""SELECT * 
-                FROM ({query}) AS `s` 
-                WHERE `s`.`posting_date` >= '{start_date}' 
-                AND `s`.`posting_date` <= '{end_date}'""".format(
-                query=frappe.get_value("VAT query", "viewVAT_{code}".format(code=code), "query"),
-                start_date=from_date, end_date=end_date).replace("{company}", company))      
-    else:
-        # fallback database view
-        sql_query = """SELECT
-                    *
-                FROM `viewVAT_{code}`
-                WHERE
-                    `posting_date` >= \"{start_date}\"
-                    AND `posting_date` <= \"{end_date}\"
-                ORDER BY
-                    `posting_date`;""".format(
-                    start_date=from_date, end_date=end_date, code=code)     
-    try:
-        data = frappe.db.sql(sql_query, as_dict = True)
-    except:
-        return []
-    return data
 
-# v15 wrapper for jinja/get_data (incompatible function name rewrite)
-def get_tax_details(from_date, end_date, code, company="%"):
+def get_data(from_date, end_date, code, company=None):
+    check_read(company)
+    start, end = period({'start_date': from_date, 'end_date': end_date})
+    code = str(code)
+    if code not in set(BOX_FIELDS) | {'322', '323', '332', '333'}:
+        frappe.throw(_('Select a Swiss VAT box.'))
+    if is_configured(company):
+        report = get_report(company, str(start), str(end))
+        return [{**r, 'remarks': _(r['remarks']), 'base_grand_total': 0 if code in INPUTS else r['amount'],
+            'total_taxes_and_charges': r['amount'] if code in INPUTS else 0,
+            'taxes_and_charges': r['account']} for r in report['evidence'] if r['box'] == code]
+    # Preserve explicitly configured legacy queries, never interpolate user input.
+    name = 'viewVAT_' + code
+    if not re.fullmatch(r'viewVAT_[0-9]{3}', name) or not frappe.db.exists('VAT query', name):
+        frappe.throw(_('Configure the company VAT mapping before retrieving amounts.'))
+    query = frappe.db.get_value('VAT query', name, 'query') or ''
+    if '{company}' not in query:
+        frappe.throw(_('The VAT query must filter the selected company using {company}.'))
+    query = query.replace("'{company}'", '%(company)s').replace('"{company}"', '%(company)s').replace('{company}', '%(company)s')
+    return frappe.db.sql(f'SELECT * FROM ({query}) s WHERE s.posting_date BETWEEN %(start)s AND %(end)s ORDER BY s.posting_date',
+        {'company': company, 'start': start, 'end': end}, as_dict=True)
+
+
+def get_tax_details(from_date, end_date, code, company=None):
     return get_data(from_date, end_date, code, company)
 
-# this is an endpoint for the jinja environment
-def get_vat_control_details(from_date, end_date, code, company="%"):
-    return get_data(from_date, end_date, code, company)
 
+def get_vat_control_details(from_date, end_date, code, company=None):
+    return get_data(from_date, end_date, code, company)

@@ -8,9 +8,16 @@ frappe.ui.form.on("VAT Declaration", {
         const start = new Date(Date.UTC(end.getUTCFullYear(), Math.floor(end.getUTCMonth() / 3) * 3, 1));
         if (!frm.doc.start_date) frm.set_value("start_date", start.toISOString().slice(0, 10));
         if (!frm.doc.end_date) frm.set_value("end_date", end.toISOString().slice(0, 10));
+        frm.set_value("auto_from_ledger", 1);
         if (!frm.doc.company) frm.set_value("company", frappe.defaults.get_user_default("Company"));
     },
     refresh(frm) {
+        if (frm.doc.company) {
+            frm.add_custom_button(__("Kontenzuordnung"), () => frappe.set_route("Form", "Swiss VAT Settings", frm.doc.company));
+            frm.add_custom_button(__("Buchungskontrolle"), () => frappe.set_route("query-report", "Kontrolle MwSt", {
+                company: frm.doc.company, from_date: frm.doc.start_date, end_date: frm.doc.end_date, code: "200"
+            }));
+        }
         if (frm.doc.docstatus === 0) {
             frm.set_intro(__("Check period, accounting amounts and reporting basis. Submit validates and archives the Swiss XML; it does not post or file anything."), "blue");
             frm.add_custom_button(__("Get values"), () => vat_get_values(frm));
@@ -62,10 +69,23 @@ async function vat_get_values(frm) {
         frappe.msgprint(__("Select company and period first.")); return;
     }
     const snapshot = JSON.stringify(frm.doc);
-    const r = await frappe.call({method: VAT_API + "get_period_values", freeze: true,
+    const r = await frappe.call({method: VAT_API + "get_period_report", freeze: true,
         freeze_message: __("Retrieving accounting amounts…"),
-        args: {company: frm.doc.company, start_date: frm.doc.start_date, end_date: frm.doc.end_date, vat_type: frm.doc.vat_type}});
-    if (r.message && JSON.stringify(frm.doc) === snapshot) { await frm.set_value(r.message); await vat_calculate(frm); }
+        args: {company: frm.doc.company, start_date: frm.doc.start_date, end_date: frm.doc.end_date, vat_type: frm.doc.vat_type, reporting_basis: frm.doc.reporting_basis || "1"}});
+    if (r.message && JSON.stringify(frm.doc) === snapshot) {
+        await frm.set_value({...r.message.values, auto_from_ledger: 1});
+        clearTimeout(frm._vat_calc_timer);
+        const c = r.message.control;
+        const escape = frappe.utils.escape_html;
+        frm.fields_dict.ledger_preview.$wrapper.html(`<div class="alert alert-${r.message.warnings.length ? "warning" : "success"}">
+            <strong>${__("Buchungen vollständig zugeordnet")}</strong><br>
+            ${escape(String(c.entry_count))} ${__("Hauptbuchzeilen geprüft")}. ${__("Umsatzsteuer gebucht / berechnet")}:
+            ${format_currency(c.booked_output_tax, "CHF")} / ${format_currency(c.calculated_output_tax, "CHF")}.
+            ${__("Differenz")}: ${format_currency(c.difference, "CHF")}<br>
+            ${__("Ausgeschlossene MWST-Abschlüsse")}: ${escape(c.excluded_closings.join(", ") || "–")}<br>
+            <small>${__("Beim Bestätigen wird der aktuelle Buchungsstand erneut gelesen und mit der XML archiviert.")}</small>
+        </div>`);
+    }
 }
 
 function vat_confirm_filing(frm) {

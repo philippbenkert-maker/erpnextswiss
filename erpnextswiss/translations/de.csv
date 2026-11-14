@@ -1158,3 +1158,28 @@ An original VAT declaration already exists for this period. Open it or create an
 An archived VAT declaration is preserved. Create a correction instead.,Archivierte MWST-Abrechnungen bleiben erhalten. Erstellen Sie eine Korrektur.
 Select company and period first.,Bitte zuerst Firma und Periode wählen.
 XML validation failed: {0},XML-Prüfung fehlgeschlagen: {0}
+Swiss VAT Settings,Schweizer MWST-Zuordnung
+Swiss VAT Account Mapping,Schweizer MWST-Kontenzuordnung
+Turnover,Umsatz
+Reduction,Entgeltsminderung
+Input tax,Vorsteuer
+Output tax,Umsatzsteuerkontrolle
+Settlement,MWST-Abrechnungskonto
+Excluded,Ausgenommen
+Other funds,Übrige Mittelflüsse
+Acquisition tax,Bezugsteuer
+Accounting and VAT declaration read permission is required.,Leserechte für Buchhaltung und MWST-Abrechnung sind erforderlich.
+Configure the company VAT mapping before retrieving amounts.,Richten Sie vor dem Werteabruf die MWST-Kontenzuordnung dieser Gesellschaft ein.
+VAT method/basis does not match the enabled company mapping.,Abrechnungsmethode oder Abrechnungsart stimmen nicht mit der aktiven Kontenzuordnung überein.
+Automatic Swiss VAT allocation requires CHF company currency.,Die automatische Schweizer MWST-Zuordnung benötigt CHF als Gesellschaftswährung.
+A ledger invoice is no longer submitted. Complete accounting reposting before VAT extraction.,Eine Rechnung des Hauptbuchs ist nicht mehr gebucht. Schliessen Sie die Buchungsaktualisierung vor dem MWST-Werteabruf ab.
+VAT allocation needs review: {0},MWST-Zuordnung prüfen: {0}
+Select a Swiss VAT box.,Wählen Sie eine Schweizer MWST-Ziffer.
+Posted net turnover,Gebuchter Nettoumsatz
+Turnover allocation,Umsatz nach Steuerbehandlung
+"Opted turnover, included in 200","Optierter Umsatz, in Ziffer 200 enthalten"
+Posted reduction of consideration,Gebuchte Entgeltsminderung
+Reduction of taxable base,Minderung der Steuerbasis
+Posted input tax including corrections,Gebuchte Vorsteuer einschliesslich Korrekturen
+Acquisition taxable base from dedicated tax account,Bezugsteuerbasis aus separatem Steuerkonto
+"Other funds, excluded from turnover 200","Übrige Mittelflüsse, nicht in Umsatz 200 enthalten"

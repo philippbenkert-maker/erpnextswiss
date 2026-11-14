@@ -1,0 +1,66 @@
+{
+ "doctype": "DocType",
+ "name": "Swiss VAT Account Mapping",
+ "module": "ERPNextSwiss",
+ "engine": "InnoDB",
+ "field_order": [
+  "account",
+  "role",
+  "box",
+  "rate_box",
+  "opted",
+  "reason"
+ ],
+ "fields": [
+  {
+   "fieldname": "account",
+   "fieldtype": "Link",
+   "label": "Konto",
+   "options": "Account",
+   "reqd": 1,
+   "in_list_view": 1,
+   "columns": 4
+  },
+  {
+   "fieldname": "role",
+   "fieldtype": "Select",
+   "label": "Verwendung",
+   "options": "Turnover\nReduction\nInput tax\nOutput tax\nSettlement\nExcluded\nOther funds\nAcquisition tax",
+   "reqd": 1,
+   "in_list_view": 1,
+   "columns": 2
+  },
+  {
+   "fieldname": "box",
+   "fieldtype": "Select",
+   "label": "MWST-Ziffer",
+   "options": "\n220\n221\n225\n230\n235\n280\n302\n303\n312\n313\n342\n343\n382\n383\n400\n405\n410\n415\n420\n900\n910",
+   "in_list_view": 1,
+   "columns": 2
+  },
+  {
+   "fieldname": "rate_box",
+   "fieldtype": "Select",
+   "label": "Steuerbasis bei Minderungen",
+   "options": "\n303\n313\n343\n302\n312\n342",
+   "depends_on": "eval:doc.role == 'Reduction'",
+   "in_list_view": 1,
+   "columns": 2
+  },
+  {
+   "fieldname": "opted",
+   "fieldtype": "Check",
+   "label": "Optierter Umsatz (in Ziffer 200 und 205)",
+   "default": 0
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Small Text",
+   "label": "Begründung / Beschreibung Ziffer 280"
+  }
+ ],
+ "track_changes": 1,
+ "istable": 1,
+ "editable_grid": 1,
+ "permissions": []
+}

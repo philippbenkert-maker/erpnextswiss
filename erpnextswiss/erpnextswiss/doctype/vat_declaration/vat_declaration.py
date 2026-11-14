@@ -15,7 +15,7 @@ from erpnextswiss.vat_xml import build_xml, calculate, money, period, read_xml, 
 
 _ARCHIVE_WRITE = ContextVar("vat_archive_write", default=False)
 EVIDENCE = ("xml_file", "xml_sha256", "xml_generated_at", "filing_status", "filing_confirmed_by",
-            "filing_confirmed_at", "filed_on", "filing_evidence", "submission_receipt", "archive_source")
+            "filing_confirmed_at", "filed_on", "filing_evidence", "submission_receipt", "archive_source", "ledger_source_sha256", "ledger_control_summary")
 
 @contextmanager
 def archive_write():
@@ -92,6 +92,12 @@ class VATDeclaration(Document):
         if self.xml_file:
             checked_xml(self)
         else:
+            if self.get("auto_from_ledger"):
+                from erpnextswiss.vat_automation import get_report
+                report = get_report(self.company, self.start_date, self.end_date, self.vat_type, self.reporting_basis)
+                self.update(report["values"])
+                self.ledger_source_sha256 = report["source_sha256"]
+                self.ledger_control_summary = frappe.as_json(report["control"])
             self._archive_xml()
 
     def before_cancel(self):
@@ -263,7 +269,10 @@ def get_tax_rate(taxes_and_charges_template):
 
 
 @frappe.whitelist()
-def get_period_values(company, start_date, end_date, vat_type="effective"):
+def get_period_values(company, start_date, end_date, vat_type="effective", reporting_basis="1"):
+    from erpnextswiss.vat_automation import is_configured, get_report
+    if is_configured(company):
+        return get_report(company, start_date, end_date, vat_type, reporting_basis)["values"]
     """One response, only after all required queries succeeded; no partial UI overwrites."""
     mapping = {"200": "total_revenue", "220": "tax_free_services", "221": "revenue_abroad", "225": "transfers",
                "230": "non_taxable_services", "235": "losses", "383": "additional_amount_2024", "382": "additional_amount"}
@@ -307,3 +316,9 @@ def inspect_existing_xml(file_name):
     return {"file_name": file.name, "journal_entry": journal.name, "company": journal.company,
             "start_date": values["start_date"], "end_date": values["end_date"],
             "payable_tax": float(values["payable_tax"]), "sha256": hashlib.sha256(content).hexdigest()}
+
+
+@frappe.whitelist()
+def get_period_report(company, start_date, end_date, vat_type="effective", reporting_basis="1"):
+    from erpnextswiss.vat_automation import get_report
+    return get_report(company, start_date, end_date, vat_type, reporting_basis)

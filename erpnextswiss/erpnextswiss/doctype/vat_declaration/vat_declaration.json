@@ -35,6 +35,11 @@
   "business_reference",
   "corrects_declaration",
   "period_key",
+  "section_ledger",
+  "auto_from_ledger",
+  "ledger_preview",
+  "ledger_source_sha256",
+  "ledger_control_summary",
   "section_revenue",
   "total_revenue",
   "non_taxable_revenue",
@@ -774,10 +779,42 @@
    "depends_on": "eval:!!doc.misc",
    "length": 50,
    "no_copy": 1
+  },
+  {
+   "fieldname": "section_ledger",
+   "fieldtype": "Section Break",
+   "label": "Automatische Buchungszuordnung"
+  },
+  {
+   "fieldname": "auto_from_ledger",
+   "fieldtype": "Check",
+   "label": "Beim Bestätigen aktuelle Buchungen automatisch übernehmen",
+   "default": "1",
+   "description": "Liest nur das Hauptbuch. Keine Buchungen, keine erneute Einreichung. Die XML wird aus dem zuletzt geprüften Buchungsstand erstellt."
+  },
+  {
+   "fieldname": "ledger_preview",
+   "fieldtype": "HTML",
+   "label": "Buchungskontrolle"
+  },
+  {
+   "fieldname": "ledger_source_sha256",
+   "fieldtype": "Data",
+   "label": "Prüfsumme Buchungsstand",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "ledger_control_summary",
+   "fieldtype": "Code",
+   "label": "Abstimmung Hauptbuch",
+   "read_only": 1,
+   "no_copy": 1,
+   "options": "JSON"
   }
  ],
  "is_submittable": 1,
- "modified": "2026-11-14 12:00:00.000000",
+ "modified": "2026-11-14 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "ERPNextSwiss",
  "name": "VAT Declaration",

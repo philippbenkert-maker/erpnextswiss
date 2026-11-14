@@ -20,7 +20,7 @@ frappe.query_reports["Kontrolle MwSt"] = {
             "fieldname":"code",
             "label": __("Code"),
             "fieldtype": "Select",
-            "options": "200\n220\n221\n225\n230\n235\n302\n303\n312\n313\n322\n323\n332\n333\n342\n343\n382\n383\n400\n405",
+            "options": "200\n205\n220\n221\n225\n230\n235\n280\n302\n303\n312\n313\n322\n323\n332\n333\n342\n343\n382\n383\n400\n405\n410\n415\n420\n900\n910",
             "default" : "200",
             "reqd": 1
         },
