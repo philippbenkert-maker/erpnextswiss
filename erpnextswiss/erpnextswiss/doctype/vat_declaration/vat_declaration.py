@@ -84,6 +84,10 @@ class VATDeclaration(Document):
             self.update({key: float(value) for key, value in totals.items()})
         self.filing_status = self.filing_status or "Draft"
 
+    def before_update_after_submit(self):
+        # Frappe skips validate() on this action; evidence protection must run here too.
+        self.validate()
+
     def before_submit(self):
         if self.xml_file:
             checked_xml(self)
