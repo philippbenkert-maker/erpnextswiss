@@ -82,3 +82,34 @@ erfolgreichen Bankempfang.
 Die konkreten Build-, Sicherungs-, Restore- und Live-Abnahmebelege gehören zum
 jeweiligen Releaseverzeichnis. Diese Bestandsaufnahme behauptet keine Prüfung
 jedes denkbaren Schweizer Geschäftsfalls und keine universelle Bankannahme.
+
+
+## Bankdateien und kontogebundener Abgleich – 1.34.6
+
+Der manuelle Bank-Assistent verwendet nun dieselbe begrenzte, XSD-geprüfte
+Importstrecke wie die geschützte CAMT-Vorschau. XML und ZIP werden als originale
+Bytes übertragen; UTF-16 bleibt erhalten. ZIP-Mitglieder werden einzeln geprüft,
+nicht im Browser zusammengefügt. Unterstützt werden camt.053.001.02/.04/.08 und
+camt.054.001.08. Ein ZIP muss ein einheitliches Profil enthalten.
+
+Vor dem Einlesen muss das berechtigte, aktive Bankkonto gewählt werden. IBAN,
+Währung und Firma müssen für alle enthaltenen Auszüge passen. Doppelte Originale,
+mehrdeutige Auszüge/Buchungsreferenzen, nicht gebuchte oder unvollständige
+Buchungen, unvollständige Seitengruppen und widersprüchliche Anfangs-/Endsalden
+führen zu einer Ablehnung der gesamten Datei. Es erscheinen dann keine teilweise
+freigegebenen Abgleichsaktionen. Kontowechsel, Dateiwechsel und Lesefehler entfernen
+alte Aktionen; ein Doppelklick startet keinen zweiten Import.
+
+EBICS-Auszüge sind beim Parsen an die Firma der berechtigten Verbindung und das
+explizite Bankkonto gebunden. Gleiche Referenzen anderer Firmen oder Bankkonten
+unterdrücken keinen gültigen Abgleich. Bereits verarbeitete Zeilen und ihre
+Zahlungsverknüpfungen können nicht durch erneutes Parsen ersetzt werden. Der
+Parser führt keinen eigenen Commit aus. Historische Buchungen werden nicht
+umgeschrieben und kein Bankauftrag wird übertragen.
+
+Abnahme: 143 bestehende Python-Tests, 40 CAMT-Datei-/Vorschautests, 17 Node-Prüfungen
+und die Prüfung aller mutierenden Schnittstellen. Zusätzlich verlangt der Release
+`scripts/bank_import_native_check.py` auf einer vollständigen isolierten
+Produktivwiederherstellung, die bestehenden MWST-/Zahlungsabnahmen sowie den
+unveränderten Buchhaltungsfingerabdruck. Diese technische Abnahme ersetzt keine
+bankseitige Freigabe eines EBICS-Transportwegs.

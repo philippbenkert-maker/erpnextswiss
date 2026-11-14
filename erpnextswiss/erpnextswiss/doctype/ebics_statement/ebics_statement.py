@@ -7,6 +7,8 @@ from frappe.model.document import Document
 from erpnextswiss.erpnextswiss.page.bank_wizard.bank_wizard import read_camt053_meta, read_camt053, make_payment_entry, get_default_accounts
 from frappe import _
 import ast
+from erpnextswiss.scripts.bank_matching_scope import BankMatchingScope
+from erpnextswiss.scripts.bank_file_admission import BankFileError
 
 class ebicsStatement(Document):
     def before_save(self):
@@ -25,74 +27,58 @@ class ebicsStatement(Document):
         return
         
     def parse_content(self, debug=False):
-        """
-        Read the xml content and parse into the doctype record
-        """
+        """Bind every statement to its authorized connection before matching."""
+        frappe.only_for(("Accounts User", "Accounts Manager", "System Manager"))
+        self.check_permission("write")
         if not self.xml_content:
-            frappe.throw( _("Cannot parse this file: {0}. No content found.").format(self.name) )
-            
-        # read meta data
-        meta = read_camt053_meta(self.xml_content)
-        self.update({
-            'currency': meta.get('currency'),
-            'opening_balance': meta.get('opening_balance'),
-            'closing_balance': meta.get('closing_balance')
-        })
-        account_matches = frappe.db.sql("""
-            SELECT `name`, `company`
-            FROM `tabAccount`
-            WHERE REPLACE(`iban`, " ", "") = "{iban}" AND `account_type` = "Bank";
-            """.format(iban=(meta.get('iban') or "").replace(" ", "")), as_dict=True)
-        print("{0}".format(account_matches))
-        if len(account_matches) > 0:
-            self.account = account_matches[0]['name']
-            self.company = account_matches[0]['company']
-            self.transactions = []
-            self.status = "Pending"             # reset status: transaction being added
-            
-            # read transactions (only if account is available) - note: transactions that are already recorded as payment entry are supressed
-            transactions = read_camt053(self.xml_content, self.account)
-            
-            if debug:
-                print("Txns: {0}".format(transactions))
-            # read transactions into the child table
-            for transaction in transactions.get('transactions'):
-                if debug:
-                    print("{0}".format(transaction))
-                # verify that this unique ID has not already been imported (happens do to the licence block in fintech)
-                duplicates = frappe.db.sql("""
-                    SELECT `name`
-                    FROM `tabebics Statement Transaction`
-                    WHERE `unique_reference` = %(ref)s
-                      AND `date` = %(date)s
-                      AND `parent` != %(stmt)s;""",
-                    {
-                        'ref': transaction.get("unique_reference"),
-                        'date': transaction.get("date"),
-                        'stmt': self.name
-                    },
-                    as_dict=True
-                )
-                if len(duplicates) > 0:
-                    continue                # skip, this transaction has 
-                # stringify lists to store them in child table
-                if transaction.get("invoice_matches"):
-                    transaction['invoice_matches'] = "{0}".format(transaction.get("invoice_matches"))
-                if transaction.get("expense_matches"):
-                    transaction['expense_matches'] = "{0}".format(transaction.get("expense_matches"))
-                
-                transaction['status'] = "Pending"
-                
-                self.append("transactions", transaction)
-                
-        else:
-            frappe.log_error( _("Unable to find matching account: please check your accounts and set IBAN {0}").format(meta.get('iban')), _("ebics statement parsing failed") )
-        
-        # save
+            frappe.throw(_("Cannot parse an empty bank statement"))
+        if any(row.payment_entry or row.status == "Completed" for row in self.transactions):
+            frappe.throw(_("Processed statement rows must be retained; they cannot be parsed again"))
+        connection = frappe.get_doc("ebics Connection", self.ebics_connection)
+        connection.check_permission("read")
+        company = connection.company
+        if not company or (self.company and self.company != company):
+            frappe.throw(_("The statement company must match its EBICS connection"))
+        frappe.get_doc("Company", company).check_permission("read")
+        try:
+            meta = read_camt053_meta(self.xml_content)
+        except BankFileError as error:
+            frappe.throw(_("Bank file could not be admitted: {0}").format(str(error)))
+        iban = "".join((meta.get("iban") or "").split()).upper()
+        accounts = frappe.get_list("Account", filters={"company": company, "account_type": "Bank",
+                                  "disabled": 0, "is_group": 0}, fields=["name", "iban", "account_currency"],
+                                  limit_page_length=0)
+        matches = [row.name for row in accounts if iban and "".join((row.iban or "").split()).upper() == iban
+                   and (not meta.get("currency") or row.account_currency == meta["currency"])
+                   and (not self.account or row.name == self.account)]
+        if len(matches) != 1:
+            frappe.throw(_("Select the unique authorized bank account matching this statement and connection"))
+        scope = BankMatchingScope(matches[0])
+        parsed = read_camt053(self.xml_content, scope.account)
+        # Child records have no company permission boundary of their own.
+        # Resolve permitted parents for this exact account before deduplication.
+        parents = frappe.get_list("ebics Statement", filters={"company": company, "account": scope.account,
+                                  "name": ["!=", self.name]}, pluck="name", limit_page_length=0)
+        existing = set()
+        if parents:
+            existing = {(row.unique_reference, str(row.date)) for row in frappe.get_all(
+                "ebics Statement Transaction", filters={"parenttype": "ebics Statement", "parent": ["in", parents]},
+                fields=["unique_reference", "date"])}
+        rows = []
+        for candidate in parsed["transactions"]:
+            if (candidate.get("unique_reference"), str(candidate.get("date"))) in existing:
+                continue
+            transaction = dict(candidate)
+            for field in ("invoice_matches", "expense_matches"):
+                if transaction.get(field):
+                    transaction[field] = str(transaction[field])
+            transaction["status"] = "Pending"
+            rows.append(transaction)
+        # All validation precedes modification. The enclosing request owns commit.
+        self.update({"company": company, "account": scope.account, "currency": scope.currency,
+                     "opening_balance": meta.get("opening_balance"), "closing_balance": meta.get("closing_balance"),
+                     "status": "Pending", "transactions": rows})
         self.save()
-        frappe.db.commit()
-        
-        return
 
     def process_transactions(self):
         """

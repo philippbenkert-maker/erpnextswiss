@@ -5,6 +5,8 @@
 import frappe
 from frappe import throw, _
 import hashlib
+import base64
+import binascii
 import json
 from bs4 import BeautifulSoup
 import ast
@@ -12,6 +14,8 @@ from frappe.utils import cint, flt
 from frappe.utils.data import get_url_to_form
 from erpnext.setup.utils import get_exchange_rate
 from erpnextswiss.scripts.bank_matching_scope import BankMatchingScope
+from erpnextswiss.scripts.bank_file_admission import BankFileError, MAX_ARCHIVE_BYTES
+from erpnextswiss.scripts.bank_camt_preview import prepare_camt_archive, preview_camt_archive, _signed
 import datetime
 
 # this function tries to match the amount to an open sales invoice
@@ -143,7 +147,7 @@ def get_default_customer():
 
 @frappe.whitelist()
 def get_bank_accounts():
-    accounts = frappe.get_list('Account', filters={'account_type': 'Bank', 'is_group': 0}, fields=['name'], order_by='account_number')
+    accounts = frappe.get_list('Account', filters={'account_type': 'Bank', 'is_group': 0, 'disabled': 0}, fields=['name'], order_by='account_number')
     selectable_accounts = []
     for account in accounts:
         selectable_accounts.append(account.name)
@@ -153,8 +157,13 @@ def get_bank_accounts():
 
 @frappe.whitelist()
 def get_default_accounts(bank_account=None, company=None):
+    frappe.only_for(("Accounts User", "Accounts Manager", "System Manager"))
     if bank_account:
-        company = frappe.get_value("Account", bank_account, "company")
+        company = BankMatchingScope(bank_account).company
+    elif company:
+        frappe.get_doc("Company", company).check_permission("read")
+    else:
+        frappe.throw(_("Select a company or bank account"))
     receivable_account = frappe.get_value('Company', company, 'default_receivable_account')
     payable_account = frappe.get_value('Company', company, 'default_payable_account')
     expense_payable_account = frappe.get_value('Company', company, 'default_expense_claim_payable_account') or payable_account
@@ -208,59 +217,85 @@ Interpret meta information of the camt.053 record
 Input: camt.053-xml-string
 Output: meta-dict
 """
+def _camt_bytes(content):
+    if isinstance(content, bytes):
+        return content
+    if not isinstance(content, str):
+        raise BankFileError("Bank XML content is required")
+    # Legacy callers pass Unicode. Browser uploads use bytes to retain their
+    # declared encoding, ZIP boundaries and original digest without conversion.
+    if len(content) > MAX_ARCHIVE_BYTES:
+        raise BankFileError("Bank upload exceeds size limits")
+    return content.encode("utf-8")
+
+
 def read_camt053_meta(content):
-    soup = BeautifulSoup(content, 'lxml')
-    meta = {
-        'iban': soup.document.bktocstmrstmt.stmt.acct.id.iban.get_text(),
-        'electronic_sequence_number': soup.document.bktocstmrstmt.stmt.elctrncseqnb.get_text(),
-        'msgid': soup.document.bktocstmrstmt.stmt.id.get_text(),
-        'currency': soup.document.bktocstmrstmt.stmt.acct.ccy.get_text()
-    }
-    # find balances
-    balances = soup.find_all('bal')
-    for balance in balances:
-        balance_soup = BeautifulSoup(str(balance), 'lxml')
-        if balance_soup.tp.cdorprtry.cd.get_text() == "OPBD":
-            meta['opening_balance'] = float(balance_soup.amt.get_text())
-        elif balance_soup.tp.cdorprtry.cd.get_text() == "CLBD":
-            meta['closing_balance'] = float(balance_soup.amt.get_text())
-            
+    _, statements = prepare_camt_archive(_camt_bytes(content))
+    if len(statements) != 1:
+        raise BankFileError("An EBICS statement must contain exactly one account statement")
+    statement = statements[0]
+    meta = {"iban": statement["iban"], "electronic_sequence_number": statement["sequence"],
+            "msgid": statement["statement_id"], "currency": statement["currency"]}
+    for code, field in (("OPBD", "opening_balance"), ("CLBD", "closing_balance")):
+        balances = [row for row in statement["balances"] if row["type"] == code]
+        if len(balances) > 1:
+            raise BankFileError("Ambiguous statement balance")
+        if balances:
+            meta[field] = str(_signed(balances[0]))
     return meta
+
+
+def _read_bank_payload(payload, account):
+    scope = BankMatchingScope(account)
+    preview = preview_camt_archive(payload, company=scope.company, accounts=[scope.account])
+    files = preview["archive"].files
+    if len({source.sha256 for source in files}) != len(files):
+        raise BankFileError("Bank upload repeats the same XML file")
+    identities = [(row["iban"], row["currency"], row["statement_id"], row["sequence"],
+                   row["created_at"], row["page"]) for row in preview["statements"]]
+    if len(set(identities)) != len(identities):
+        raise BankFileError("Bank upload repeats an ambiguous statement identity")
+    transactions = []
+    references = set()
+    for statement in preview["statements"]:
+        if statement["balance_check"] in ("mismatch", "requires_page_assembly"):
+            raise BankFileError("Statement balances or page completeness require review")
+        for entry in statement["entries"]:
+            if entry["issues"]:
+                raise BankFileError("A bank booking requires review before import: " + ", ".join(entry["issues"]))
+            for candidate in entry["candidates"]:
+                identity = (candidate.get("date"), candidate.get("unique_reference"))
+                if identity in references:
+                    raise BankFileError("Bank upload contains an ambiguous repeated booking reference")
+                references.add(identity)
+                transactions.append(candidate)
+    return {"transactions": transactions, "html": render_transactions(transactions), "bank": scope.account}
+
 
 @frappe.whitelist(methods=["POST"])
 def read_camt053(content, account):
     frappe.only_for(("Accounts User", "Accounts Manager", "System Manager"))
-    scope = BankMatchingScope(account)
-    settings = frappe.get_doc("ERPNextSwiss Settings", "ERPNextSwiss Settings")
-
-    #read_camt_transactions_re(content)
-    soup = BeautifulSoup(content, 'lxml')
-
-    # general information
     try:
-        #iban = doc['Document']['BkToCstmrStmt']['Stmt']['Acct']['Id']['IBAN']
-        iban = soup.document.bktocstmrstmt.stmt.acct.id.iban.get_text()
-    except:
-        # fallback (Credit Suisse will provide bank account number instead of IBAN)
-        iban = "n/a"
+        return _read_bank_payload(_camt_bytes(content), account)
+    except BankFileError as error:
+        frappe.throw(_("Bank file could not be admitted: {0}").format(str(error)), frappe.ValidationError)
+
+
+@frappe.whitelist(methods=["POST"])
+def read_camt_file(content_base64, account):
+    """Admit the complete XML/ZIP before returning any actionable matches."""
+    frappe.only_for(("Accounts User", "Accounts Manager", "System Manager"))
+    try:
+        if (not isinstance(content_base64, str) or not content_base64
+                or len(content_base64) > 4 * ((MAX_ARCHIVE_BYTES + 2) // 3)):
+            raise BankFileError("Bank upload exceeds size limits")
         try:
-            acct_no = soup.document.bktocstmrstmt.stmt.acct.id.othr.id.get_text()
-        except:
-            # node not found, probably wrong format
-            iban = "n/a"
-            frappe.log_error("Unable to read structure. Please make sure that you have selected the correct format.", "BankWizard read_camt053")
-            
-    # Keep the user's authorized account, including when another company uses
-    # the same IBAN. Legacy files with only a bank account number remain manual.
-    if iban != "n/a":
-        scope.check_iban(iban)
-    
-    # transactions
-    entries = soup.find_all('ntry')
-    transactions = read_camt_transactions(entries, account, settings)
-    html = render_transactions(transactions)
-    
-    return { 'transactions': transactions, 'html': html, 'bank': scope.account }
+            payload = base64.b64decode(content_base64, validate=True)
+        except (ValueError, binascii.Error):
+            raise BankFileError("Bank upload has an invalid encoding") from None
+        return _read_bank_payload(payload, account)
+    except BankFileError as error:
+        frappe.throw(_("Bank file could not be admitted: {0}").format(str(error)), frappe.ValidationError)
 
 @frappe.whitelist()
 def render_transactions(transactions):

@@ -21,105 +21,61 @@ frappe.bank_wizard = {
         var data = "";
         $(frappe.render_template('bank_wizard', data)).appendTo(me.body);
         
-        // attach button handlers
-        this.page.main.find(".btn-parse-file").on('click', function() {            
-            // get selected account
-            var account = document.getElementById("bank_account").value;
-            
-            // read the file 
-            var file = document.getElementById("input_file").files[0];
-            if (file.name.toLowerCase().endsWith(".xml")) {
-                // this is an xml file
-                
-                var content = "";
-                if (file) {
-                    // create a new reader instance
-                    var reader = new FileReader();
-                    // assign load event to process the file
-                    reader.onload = function (event) {
-                        // enable waiting gif
-                        frappe.bank_wizard.start_wait();
-                        
-                        // read file content
-                        content = event.target.result;
-                        
-                        // parse the xml content
-                        frappe.bank_wizard.parse(content, account);
-                    }
-                    // assign an error handler event
-                    reader.onerror = function (event) {
-                        frappe.msgprint("Fehler beim Lesen der Datei", "Fehler");
-                    }
-                    
-                    reader.readAsText(file, "ANSI");
-                }
-                else
-                {
-                    frappe.msgprint("Bitte eine Datei auswählen.", "Information");
-                }
-            } else if (file.name.toLowerCase().endsWith(".zip")) {
-                // this is a zip file
-                console.log("unzipping " + file.name + "...");
-                // enable waiting gif
-                frappe.bank_wizard.start_wait();
-                // unzip
-                JSZip.loadAsync(file).then(function(zip) {
-                    // async: compile a promise to extract all contained files
-                    var promises = [];
-                    zip.forEach(function (relativePath, zipEntry) {
-                        promises.push(zipEntry.async("string").then(
-                            function (data) {
-                                return data; 
-                            })
-                        );
-                    });
-                    // on completed promise, combine content and process
-                    Promise.all(promises).then(function (list) {
-                        console.log("Promise complete!");
-                        var content = list.join("");
-                        // parse the xml content
-                        frappe.bank_wizard.parse(content, account);
-                    });
-                }, function (e) {
-                    frappe.msgprint("Fehler beim Entpacken: " + e.message, "Fehler");
-                });
-            } else {
-                frappe.msgprint("Nicht unterstütztes Dateiformat. Bitte eine XML- oder ZIP-CAMT-Datei verwenden.", "Fehler");
+        this.page.main.find(".btn-parse-file").on('click', function() {
+            if (me.busy) return;
+            const account = document.getElementById("bank_account").value;
+            const file = document.getElementById("input_file").files[0];
+            me.clear_preview();
+            if (!file || !account) {
+                frappe.msgprint("Bitte eine Bankdatei und das zugehörige Bankkonto auswählen.");
+                return;
+            }
+            if (!/\.(xml|zip)$/i.test(file.name) || !file.size || file.size > 32 * 1024 * 1024) {
+                frappe.msgprint("Bitte eine XML- oder ZIP-CAMT-Datei mit höchstens 32 MB auswählen.");
+                return;
+            }
+            me.start_wait();
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                // Preserve original bytes/encoding. ZIP members are validated
+                // separately on the server, never joined into one XML string.
+                const encoded = String(event.target.result).split(',')[1];
+                me.parse(encoded, account);
+            };
+            reader.onerror = reader.onabort = function() {
+                me.end_wait();
+                frappe.msgprint("Die Datei konnte nicht gelesen werden. Bitte erneut auswählen.");
+            };
+            try {
+                reader.readAsDataURL(file);
+            } catch (error) {
+                reader.onerror();
             }
         });
+        this.page.main.find("#input_file").on('change', function() { me.clear_preview(); });
+    },
+    clear_preview: function() {
+        document.getElementById("table_placeholder").innerHTML = "";
+        document.getElementById("auto_process_matches").value = 0;
     },
     parse: function(content, account) {
-        // call bankimport method with file content
         frappe.call({
-            method: 'erpnextswiss.erpnextswiss.page.bank_wizard.bank_wizard.read_camt053',
-            args: {
-                content: content,
-                account: account
-            },
+            method: 'erpnextswiss.erpnextswiss.page.bank_wizard.bank_wizard.read_camt_file',
+            type: 'POST',
+            args: { content_base64: content, account: account },
             callback: function(r) {
-                if (r.message) {
-                    //try {
-                        frappe.show_alert(r.message.transactions.length + "&nbsp;Transaktionen gefunden");
-                        let bank_account_element = document.getElementById("bank_account");
-                        if (r.message.bank != "n/a") {
-                            bank_account_element.value = r.message.bank;
-                            frappe.bank_wizard.set_default_accounts(r.message.bank);  // onchange will not trigger automatically, update accounts
-                            bank_account_element.disabled = true;
-                        } else {
-                            // enable manual selection of bank account
-                            bank_account_element.disabled = false;
-                            // disable auto-submit
-                            document.getElementById("auto_process_matches").value = 0;
-                        }
-                        bank_account_element.style.visibility = 'visible';
-                        frappe.bank_wizard.render_response(r.message);
-                        
-                    //} catch {
-                    //    frappe.msgprint( "An error occurred while parsing. Please check the log files." );
-                    //    frappe.bank_wizard.end_wait();
-                    //}
-                } 
-            }
+                if (!r.message || r.exc) return;
+                document.getElementById("bank_account").value = r.message.bank;
+                if (!frappe.bank_wizard.set_default_accounts(r.message.bank)) {
+                    frappe.bank_wizard.clear_preview();
+                    frappe.msgprint("Die Kontoeinstellungen konnten nicht geladen werden. Bitte erneut einlesen.");
+                    return;
+                }
+                frappe.show_alert(r.message.transactions.length + " Transaktionen zum Abgleich");
+                frappe.bank_wizard.render_response(r.message);
+            },
+            error: function() { frappe.bank_wizard.clear_preview(); },
+            always: function() { frappe.bank_wizard.end_wait(); }
         });
     },
     run: function() {
@@ -131,16 +87,17 @@ frappe.bank_wizard = {
                     var select = document.getElementById("bank_account");
                     // add on change event
                     select.onchange = function() {
-                        frappe.bank_wizard.set_default_accounts(select.value);
+                        frappe.bank_wizard.clear_preview();
+                        if (select.value) frappe.bank_wizard.set_default_accounts(select.value);
                     };
                     for (var i = 0; i < r.message.accounts.length; i++) {
                         var opt = document.createElement("option");
                         opt.value = r.message.accounts[i];
-                        opt.innerHTML = r.message.accounts[i];
+                        opt.textContent = r.message.accounts[i];
                         select.appendChild(opt);
                     }
                     // call with initial value
-                    frappe.bank_wizard.set_default_accounts(select.value);
+                    if (select.value) frappe.bank_wizard.set_default_accounts(select.value);
                 } 
             }
         }); 
@@ -176,6 +133,7 @@ frappe.bank_wizard = {
         }); 
     },
     set_default_accounts: function(bank_account) {
+        let loaded = false;
         frappe.call({
             'method': 'erpnextswiss.erpnextswiss.page.bank_wizard.bank_wizard.get_default_accounts',
             'args': {
@@ -189,24 +147,27 @@ frappe.bank_wizard = {
                     document.getElementById("receivable_account").value = r.message.receivable_account;
                     document.getElementById("expense_payable_account").value = r.message.expense_payable_account;
                     document.getElementById("auto_process_matches").value = r.message.auto_process_matches;
-                } else {
-                    frappe.msgprint("Bitte die <b>Standardkonten</b> in <a href=\"/desk#Form/Company/" + r.message.company + "\">" + r.message.company + "</a> setzen.");
+                    loaded = true;
                 }
             }
-        }); 
+        });
+        return loaded;
     },
     start_wait: function() {
+        frappe.bank_wizard.busy = true;
         document.getElementById("waitingScreen").classList.remove("hidden");
-        document.getElementById("btn-parse-file").classList.add("disabled");
+        ["btn-parse-file", "input_file", "bank_account"].forEach(function(id) {
+            document.getElementById(id).disabled = true;
+        });
     },
     end_wait: function() {
+        frappe.bank_wizard.busy = false;
         document.getElementById("waitingScreen").classList.add("hidden");
-        document.getElementById("btn-parse-file").classList.remove("disabled");
+        ["btn-parse-file", "input_file", "bank_account"].forEach(function(id) {
+            document.getElementById(id).disabled = false;
+        });
     },
     render_response: function(message) {
-        // disable waiting gif
-        frappe.bank_wizard.end_wait();
-    
         // display the transactions as table
         let container = document.getElementById("table_placeholder");
         // var content = frappe.render_template('transaction_table', message);

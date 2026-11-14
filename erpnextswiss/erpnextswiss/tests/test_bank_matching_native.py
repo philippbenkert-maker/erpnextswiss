@@ -1,6 +1,8 @@
 """Native permission/query regressions; synthetic rows, no GL or bank operations."""
 
 import unittest
+import base64
+from copy import deepcopy
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -268,3 +270,113 @@ class TestBankMatchingNative(unittest.TestCase):
         self.assertEqual(candidate['party_match'], supplier)
         self.assertEqual(candidate['invoice_matches'], [invoice])
         self.assertEqual(candidate['matched_amount'], 12.34)
+
+
+    def test_manual_binary_upload_validates_all_profiles_and_keeps_literal_parties(self):
+        frappe.db.set_single_value('ERPNextSwiss Settings', 'always_use_entry_amount', 0)
+        for profile in PROFILES:
+            content = etree.tostring(etree.fromstring(detailed_xml(profile, remark=self.invoice_a)),
+                                     encoding='UTF-16', xml_declaration=True)
+            for payload in (content, zipped([('statement.xml', content)])):
+                with patch.object(frappe.db, 'commit', side_effect=AssertionError('No commit')), \
+                        patch.object(Document, 'insert', side_effect=AssertionError('No insert')), \
+                        patch.object(Document, 'save', side_effect=AssertionError('No save')):
+                    result = bank_wizard.read_camt_file(base64.b64encode(payload).decode(), self.account_a)
+                self.assertEqual(result['bank'], self.account_a)
+                self.assertEqual(len(result['transactions']), 1)
+                self.assertEqual(result['transactions'][0]['amount'], 12.34)
+                self.assertEqual(result['transactions'][0]['invoice_matches'], [self.invoice_a])
+                self.assertIn('&lt;Bank&gt;', result['html'])
+
+    def test_manual_rejects_late_foreign_account_without_partial_render(self):
+        other = xml().replace(b'CH9300762011623852957', b'CH5604835012345678009')
+        for payload in (zipped([('first.xml', detailed_xml()), ('other.xml', other)]),
+                        zipped([('first.xml', detailed_xml()), ('bad.xml', b'<html/>')])):
+            with patch.object(bank_wizard, 'render_transactions', side_effect=AssertionError('No partial actions')):
+                with self.assertRaises(frappe.ValidationError):
+                    bank_wizard.read_camt_file(base64.b64encode(payload).decode(), self.account_a)
+
+    def test_manual_rejects_duplicate_originals_statement_ids_and_references(self):
+        original = detailed_xml()
+        changed_message = original.replace(b'synthetic-test', b'different-message')
+        changed_statement = original.replace(b'statement-1', b'statement-2')
+        for payload in (zipped([('a.xml', original), ('b.xml', original)]),
+                        zipped([('a.xml', original), ('b.xml', changed_message)]),
+                        zipped([('a.xml', original), ('b.xml', changed_statement)])):
+            with self.assertRaises(frappe.ValidationError):
+                bank_wizard.read_camt_file(base64.b64encode(payload).decode(), self.account_a)
+        for value in ('not base64!', '', None):
+            with self.assertRaises(frappe.ValidationError):
+                bank_wizard.read_camt_file(value, self.account_a)
+
+    def test_manual_balance_mismatch_and_fragment_cannot_offer_actions(self):
+        root = etree.fromstring(xml(entries=True))
+        ns = {'b': root.nsmap[None]}
+        stmt = root.find('.//b:Stmt', ns)
+        opening = deepcopy(stmt.find('b:Bal', ns))
+        opening.find('b:Tp/b:CdOrPrtry/b:Cd', ns).text = 'OPBD'
+        stmt.insert(list(stmt).index(stmt.find('b:Bal', ns)), opening)
+        with self.assertRaises(frappe.ValidationError):
+            bank_wizard.read_camt053(etree.tostring(root), self.account_a)
+        opening.find('b:Amt', ns).text = '1221.66'
+        self.assertEqual(len(bank_wizard.read_camt053(etree.tostring(root), self.account_a)['transactions']), 1)
+        tag = lambda name: '{' + ns['b'] + '}' + name
+        pagination = etree.Element(tag('StmtPgntn'))
+        etree.SubElement(pagination, tag('PgNb')).text = '1'
+        etree.SubElement(pagination, tag('LastPgInd')).text = 'false'
+        stmt.insert(1, pagination)
+        with self.assertRaises(frappe.ValidationError):
+            bank_wizard.read_camt053(etree.tostring(root), self.account_a)
+
+    def statement_fixture(self, label='CURRENT', **values):
+        connection = 'KT-CONNECTION-' + self.key
+        if not frappe.db.exists('ebics Connection', connection):
+            self.row('ebics Connection', connection, company=self.company_a)
+        name = 'KT-STATEMENT-' + label + '-' + self.key
+        self.row('ebics Statement', name, ebics_connection=connection, company=self.company_a,
+                 account=self.account_a, status='Pending', xml_content=detailed_xml().decode(), **values)
+        return frappe.get_doc('ebics Statement', name)
+
+    def test_ebics_connection_company_and_account_are_binding_before_save(self):
+        doc = self.statement_fixture()
+        for company, account in ((self.company_b, self.account_a), (self.company_a, self.account_b)):
+            doc.company, doc.account = company, account
+            with patch.object(Document, 'save', side_effect=AssertionError('No save on binding failure')):
+                with self.assertRaises(frappe.ValidationError):
+                    doc.parse_content()
+        doc.company, doc.account = self.company_a, None
+        # Two permitted accounts share this IBAN. Never silently choose one.
+        with self.assertRaises(frappe.ValidationError):
+            doc.parse_content()
+
+    def test_ebics_deduplication_uses_exact_company_and_bank_account(self):
+        frappe.db.set_single_value('ERPNextSwiss Settings', 'always_use_entry_amount', 0)
+        doc = self.statement_fixture()
+        for label, company, account in (('FOREIGN', self.company_b, self.account_b),
+                                        ('OTHER', self.company_a, self.account_other)):
+            parent = 'KT-OLD-' + label + '-' + self.key
+            self.row('ebics Statement', parent, company=company, account=account)
+            self.row('ebics Statement Transaction', parent+'-ROW', parent=parent, parenttype='ebics Statement',
+                     parentfield='transactions', idx=1, unique_reference='synthetic-reference-0', date='2026-09-12')
+        with patch.object(frappe.db, 'commit', side_effect=AssertionError('Request owns commit')):
+            doc.parse_content()
+        self.assertEqual(len(doc.transactions), 1)
+        self.assertEqual(doc.transactions[0].amount, 12.34)
+        same = 'KT-OLD-SAME-' + self.key
+        self.row('ebics Statement', same, company=self.company_a, account=self.account_a)
+        self.row('ebics Statement Transaction', same+'-ROW', parent=same, parenttype='ebics Statement',
+                 parentfield='transactions', idx=1, unique_reference='synthetic-reference-0', date='2026-09-12')
+        doc.parse_content()
+        self.assertEqual(len(doc.transactions), 0)
+        self.assertEqual(doc.account, self.account_a)
+
+    def test_ebics_processed_history_and_signed_balances_are_preserved(self):
+        doc = self.statement_fixture()
+        doc.append('transactions', {'status': 'Completed', 'unique_reference': 'retained'})
+        with patch.object(Document, 'save', side_effect=AssertionError('No rewrite of completed rows')):
+            with self.assertRaises(frappe.ValidationError):
+                doc.parse_content()
+        negative = xml().replace(b'<CdtDbtInd>CRDT', b'<CdtDbtInd>DBIT')
+        self.assertEqual(bank_wizard.read_camt053_meta(negative)['closing_balance'], '-1234.00')
+        with self.assertRaises(BankFileError):
+            bank_wizard.read_camt053_meta(xml(multiple=True))

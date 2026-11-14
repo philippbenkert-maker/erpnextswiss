@@ -25,16 +25,24 @@ def detailed_xml(profile=PROFILE, currency='CHF', amounts=('12.34',), reference=
         tx = etree.SubElement(details, tag('TxDtls'))
         refs = etree.SubElement(tx, tag('Refs'))
         etree.SubElement(refs, tag('AcctSvcrRef')).text = reference + '-' + str(index)
-        etree.SubElement(tx, tag('Amt'), Ccy=currency).text = amount
+        if profile == 'camt.053.001.02':
+            amount_details = etree.SubElement(tx, tag('AmtDtls'))
+            if foreign_amount:
+                instructed = etree.SubElement(amount_details, tag('InstdAmt'))
+                etree.SubElement(instructed, tag('Amt'), Ccy='USD').text = '999.12'
+            transaction_amount = etree.SubElement(amount_details, tag('TxAmt'))
+            etree.SubElement(transaction_amount, tag('Amt'), Ccy=currency).text = amount
+        else:
+            etree.SubElement(tx, tag('Amt'), Ccy=currency).text = amount
         if profile == 'camt.053.001.04':
             etree.SubElement(tx, tag('CdtDbtInd')).text = 'CRDT'
-        if foreign_amount:
+        if foreign_amount and profile != 'camt.053.001.02':
             amt_details = etree.SubElement(tx, tag('AmtDtls'))
             tx_amount = etree.SubElement(amt_details, tag('TxAmt'))
             etree.SubElement(tx_amount, tag('Amt'), Ccy='USD').text = '999.12'
         parties = etree.SubElement(tx, tag('RltdPties'))
         debtor = etree.SubElement(parties, tag('Dbtr'))
-        party = debtor if profile == 'camt.053.001.04' else etree.SubElement(debtor, tag('Pty'))
+        party = debtor if profile in ('camt.053.001.02', 'camt.053.001.04') else etree.SubElement(debtor, tag('Pty'))
         etree.SubElement(party, tag('Nm')).text = 'Test & Co <Bank> / Customer'
         remit = etree.SubElement(tx, tag('RmtInf'))
         etree.SubElement(remit, tag('Ustrd')).text = remark
@@ -73,7 +81,7 @@ class TestBankCamtPreview(unittest.TestCase):
             entry = statements[0]['entries'][0]
             converted = etree.fromstring(preview._matcher_xml(entry['xml']).encode())
             self.assertEqual(converted.findtext('ntrydtls/txdtls/rmtinf/ustrd'), 'Synthetic & <reference> / customer')
-            party_path = ('ntrydtls/txdtls/rltdpties/dbtr/nm' if profile == 'camt.053.001.04'
+            party_path = ('ntrydtls/txdtls/rltdpties/dbtr/nm' if profile in ('camt.053.001.02', 'camt.053.001.04')
                           else 'ntrydtls/txdtls/rltdpties/dbtr/pty/nm')
             self.assertEqual(converted.findtext(party_path), 'Test & Co <Bank> / Customer')
 

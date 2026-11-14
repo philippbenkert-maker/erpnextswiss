@@ -26,11 +26,11 @@ def xml(profile=PROFILE, currency="CHF", entries=False, multiple=False):
     account = "<Acct><Id><IBAN>CH9300762011623852957</IBAN></Id><Ccy>" + currency + "</Ccy></Acct>"
     balance = ("<Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy=\"" + currency
                + "\">1234.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-09-12</Dt></Dt></Bal>")
-    status = "<Sts>BOOK</Sts>" if profile == "camt.053.001.04" else "<Sts><Cd>BOOK</Cd></Sts>"
+    status = "<Sts>BOOK</Sts>" if profile in ("camt.053.001.02", "camt.053.001.04") else "<Sts><Cd>BOOK</Cd></Sts>"
     entry = ("<Ntry><Amt Ccy=\"" + currency + "\">12.34000</Amt><CdtDbtInd>CRDT</CdtDbtInd>"
              + status + "<BookgDt><Dt>2026-09-12</Dt></BookgDt>"
              "<BkTxCd><Prtry><Cd>TEST</Cd></Prtry></BkTxCd></Ntry>")
-    created = "<CreDtTm>2026-09-12T10:00:00Z</CreDtTm>" if profile == "camt.053.001.04" else ""
+    created = "<CreDtTm>2026-09-12T10:00:00Z</CreDtTm>" if profile in ("camt.053.001.02", "camt.053.001.04") else ""
     row = "<" + unit + "><Id>statement-1</Id>" + created + account + (balance if statement else "")
     row += (entry if entries else "") + "</" + unit + ">"
     return ("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Document xmlns=\""
@@ -59,6 +59,26 @@ def end_record(payload, **values):
 
 
 class TestBankFileAdmission(unittest.TestCase):
+    def test_raw_and_zip_autodetect_legacy_and_current_versions_preserving_bytes(self):
+        from erpnextswiss.scripts.bank_file_admission import read_bank_payload
+        for profile in admission.PROFILES:
+            for encoding in ("UTF-8", "UTF-16"):
+                content = etree.tostring(etree.fromstring(xml(profile)), encoding=encoding, xml_declaration=True)
+                for payload in (content, zipped([("test.xml", content)])):
+                    archive = read_bank_payload(payload)
+                    self.assertEqual(archive.profile, profile)
+                    self.assertEqual(archive.files[0].content, content)
+        with self.assertRaises(admission.BankFileError):
+            read_bank_payload(zipped([("a.xml", xml("camt.053.001.02")), ("b.xml", xml(PROFILE))]))
+
+    def test_autodetection_does_not_accept_joined_documents_or_external_resources(self):
+        from erpnextswiss.scripts.bank_file_admission import read_bank_payload
+        bad_inputs = [xml() + xml(), b"<Document/>", b"<html>not a statement</html>",
+                      b'<!DOCTYPE Document SYSTEM "file:///must-not-be-opened">' + xml()]
+        for payload in bad_inputs:
+            with self.assertRaises(admission.BankFileError):
+                read_bank_payload(payload)
+
     def test_existing_schemas_cover_both_profiles_currencies_and_balance_only(self):
         for profile in admission.PROFILES:
             for currency in ("CHF", "EUR"):

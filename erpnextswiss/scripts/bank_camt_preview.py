@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from lxml import etree
 
-from erpnextswiss.scripts.bank_file_admission import BankFileError, PROFILES, _parser, read_bank_archive
+from erpnextswiss.scripts.bank_file_admission import BankFileError, PROFILES, _parser, read_bank_payload
 
 
 MAX_STATEMENTS = 256
@@ -50,9 +50,10 @@ def _local_tree(node, namespace):
     return local
 
 
-def prepare_camt_archive(payload, profile):
+def prepare_camt_archive(payload, profile=None):
     """Format-only preparation. It grants no account access or import approval."""
-    archive = read_bank_archive(payload, profile)
+    archive = read_bank_payload(payload, profile)
+    profile = archive.profile
     namespace = '{urn:iso:std:iso:20022:tech:xsd:' + profile + '}'
     unit = 'Stmt' if PROFILES[profile] == 'BkToCstmrStmt' else 'Ntfctn'
     statements = []
@@ -163,7 +164,7 @@ def _balance_check(statement):
     return 'matched' if _signed(opening[0]) + movement == _signed(closing[0]) else 'mismatch'
 
 
-def preview_camt_archive(payload, profile, *, company, accounts):
+def preview_camt_archive(payload, profile=None, *, company, accounts):
     """Read-only handover using configured accounts and native current permissions.
 
     Results are preview/evidence, never ready-to-book instructions. File/ordinal
@@ -188,7 +189,7 @@ def preview_camt_archive(payload, profile, *, company, accounts):
     # Validate EVERY statement before the first financial candidate query. A bad
     # later account/file cannot yield a partially authorized match result.
     for statement in statements:
-        matches = [scope for (iban, currency), scope in scopes.items() if iban == statement['iban']
+        matches = [scope for (iban, currency), scope in scopes.items() if iban == ''.join((statement['iban'] or '').split()).upper()
                    and (not statement['currency'] or statement['currency'] == currency)]
         if len(matches) != 1:
             raise BankFileError('Bank file account binding is absent or ambiguous')
@@ -204,6 +205,8 @@ def preview_camt_archive(payload, profile, *, company, accounts):
             entry.update(issues=_entry_issues(entry, settings), candidates=[])
             if statement['balance_check'] == 'mismatch':
                 entry['issues'].append('statement_balance_mismatch')
+            elif statement['balance_check'] == 'requires_page_assembly':
+                entry['issues'].append('statement_requires_page_assembly')
             entry['matching_state'] = 'review_required' if entry['issues'] else 'previewed'
             if not entry['issues']:
                 eligible.append(entry)

@@ -27,6 +27,7 @@ MAX_XML_ELEMENTS = 100000
 MAX_XML_DEPTH = 64
 MAX_XML_ATTRIBUTES = 128
 PROFILES = {
+    "camt.053.001.02": "BkToCstmrStmt",
     "camt.053.001.04": "BkToCstmrStmt",
     "camt.053.001.08": "BkToCstmrStmt",
     "camt.054.001.08": "BkToCstmrDbtCdtNtfctn",
@@ -66,8 +67,9 @@ class _NoExternalResources(etree.Resolver):
 
 class _XmlBudget:
     def __init__(self, profile):
-        self.namespace = _profile(profile)
-        self.body = self.namespace + PROFILES[profile]
+        self.profile = profile
+        self.namespace = _profile(profile) if profile else None
+        self.body = self.namespace + PROFILES[profile] if profile else None
         self.depth = self.elements = self.bodies = 0
 
     def start(self, tag, attributes):
@@ -76,6 +78,12 @@ class _XmlBudget:
         if (self.depth > MAX_XML_DEPTH or self.elements > MAX_XML_ELEMENTS
                 or len(attributes) > MAX_XML_ATTRIBUTES):
             raise BankFileError("XML structure exceeds bank file limits")
+        if self.depth == 1 and self.profile is None:
+            self.profile = next((p for p in PROFILES if tag == _profile(p) + "Document"), None)
+            if self.profile is None:
+                raise BankFileError("Unsupported bank XML profile")
+            self.namespace = _profile(self.profile)
+            self.body = self.namespace + PROFILES[self.profile]
         if self.depth == 1 and tag != self.namespace + "Document":
             raise BankFileError("XML profile does not match the requested bank file")
         if self.depth == 2:
@@ -100,7 +108,7 @@ def _parser(target=None):
     return parser
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=8)
 def _schema(profile):
     _profile(profile)
     # Use only the existing packaged schema, never a document's schemaLocation.
@@ -108,17 +116,21 @@ def _schema(profile):
     return etree.XMLSchema(etree.fromstring(path.read_bytes(), _parser()))
 
 
-def validate_camt_xml(content: bytes, profile: str) -> None:
+def validate_camt_xml(content: bytes, profile: str | None = None) -> str:
     """Validate bytes and the existing XSD without normalizing or mapping money."""
-    _profile(profile)
+    if profile is not None:
+        _profile(profile)
     if not isinstance(content, bytes) or not 0 < len(content) <= MAX_FILE_BYTES:
         raise BankFileError("Bank XML size is outside limits")
     try:
         # The event-only pass bounds the tree before schema validation allocates it.
-        etree.fromstring(content, _parser(_XmlBudget(profile)))
+        budget = _XmlBudget(profile)
+        etree.fromstring(content, _parser(budget))
+        profile = budget.profile
         document = etree.fromstring(content, _parser())
         if not _schema(profile).validate(document):
             raise BankFileError("Bank XML does not satisfy the requested schema")
+        return profile
     except etree.LxmlError:
         raise BankFileError("Invalid bank XML or packaged schema") from None
 
@@ -184,14 +196,15 @@ def _complete_member(payload, info):
     return content
 
 
-def read_bank_archive(payload: bytes, profile: str) -> BankArchive:
+def read_bank_archive(payload: bytes, profile: str | None = None) -> BankArchive:
     """Admit an entire ZIP atomically; return byte-exact XML files, never extract.
 
     This proves format safety only, not permission, IBAN ownership, duplicate
     business transactions or approval to book. An invalid later member returns no
     partial result. No generator/callback can write early members along the way.
     """
-    _profile(profile)
+    if profile is not None:
+        _profile(profile)
     if not isinstance(payload, bytes) or not 0 < len(payload) <= MAX_ARCHIVE_BYTES:
         raise BankFileError("Bank archive size is outside limits")
     count = _directory_budget(payload)
@@ -228,10 +241,21 @@ def read_bank_archive(payload: bytes, profile: str) -> BankArchive:
                 with archive.open(info, "r"):
                     content = _complete_member(payload, info)
                 if not info.is_dir():
-                    validate_camt_xml(content, profile)
+                    profile = validate_camt_xml(content, profile)
                     files.append(CamtFile(info.filename, content, sha256(content).hexdigest()))
             if not files:
                 raise BankFileError("Bank ZIP contains no XML documents")
             return BankArchive(profile, sha256(payload).hexdigest(), tuple(files))
     except (BadZipFile, NotImplementedError, RuntimeError, EOFError, zlib.error, UnicodeError, struct.error):
         raise BankFileError("Invalid bank ZIP encoding or integrity") from None
+
+
+def read_bank_payload(payload: bytes, profile: str | None = None) -> BankArchive:
+    """The same bounded admission for raw XML and whole, byte-exact ZIP uploads."""
+    if not isinstance(payload, bytes) or not 0 < len(payload) <= MAX_ARCHIVE_BYTES:
+        raise BankFileError("Bank upload size is outside limits")
+    if payload.startswith(b"PK"):
+        return read_bank_archive(payload, profile)
+    profile = validate_camt_xml(payload, profile)
+    digest = sha256(payload).hexdigest()
+    return BankArchive(profile, digest, (CamtFile("statement.xml", payload, digest),))

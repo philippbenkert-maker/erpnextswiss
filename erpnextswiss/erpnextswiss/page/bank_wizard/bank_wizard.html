@@ -1,15 +1,14 @@
 <div style="margin: 5px; margin-top: 0px; border-top: 1px solid white; ">
-  <!-- load the zip extension -->
-  <script src="/assets/erpnextswiss/js/jszip.min.js"></script>
-  
-  <p class="text-muted">Importiert Zahlungseinträge aus einer Bankdatei und unterstützt den direkten Abgleich.</p>
+  <p class="text-muted">Prüft XML- und ZIP-Kontoauszüge vor dem Abgleich: Dateiformat, Kontozuordnung, Währung, Sammelbuchungen und vorhandene Salden. Die Datei muss zum gewählten Bankkonto gehören.</p>
 
   <div class="section-body">
     <div class="row"> 
       <div class="form-column col-sm-6">
-        <p>Datei <input type="file" id="input_file" /></p>
+        <p><label for="input_file">Bankdatei (CAMT XML oder ZIP)</label> <input type="file" id="input_file" accept=".xml,.zip" /></p>
         <p>
-            <select id="bank_account" disabled style="visibility: hidden;">
+            <label for="bank_account">Bankkonto</label>
+            <select id="bank_account" class="form-control">
+                <option value="">Bitte Bankkonto auswählen …</option>
             </select>
             <input id="intermediate_account" class="hidden" />
             <input id="company" class="hidden" />
@@ -24,7 +23,7 @@
 
       <div class="form-column col-sm-6" style="text-align: right; ">	  	
         <br><button type="submit" id="btn-parse-file" class="btn btn-sm btn-primary btn-parse-file">Einlesen</button>
-        <i id="waitingScreen" class="fa fa-spinner fa-spin hidden"></i>
+
       </div>
     </div>
       
@@ -37,11 +36,11 @@
   
 </div>
 
-<div id="waitingScreen" class="overlay">
+<div id="waitingScreen" class="overlay hidden" role="status" aria-live="polite">
   <!-- Overlay content -->
   <div class="overlay-content">
     <p><i class="fa fa-spinner fa-spin" style="font-size:80px"></i></p>
-    <p>Bitte warten, Daten werden eingelesen...</p>
+    <p>Bankdatei wird vollständig geprüft …</p>
     <div class="" id="zipcontent"></div>
   </div>
 </div>
