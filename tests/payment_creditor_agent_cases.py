@@ -109,51 +109,45 @@ def test_rendered_templates_are_schema_valid_and_preserve_transaction(version, s
 
 @pytest.mark.parametrize("xsd_enabled", [0, 1])
 @pytest.mark.parametrize("valid_bank", [False, True])
-def test_actual_generation_checks_before_render_even_without_xsd(xsd_enabled, valid_bank):
-    # Execute the real method, with I/O collaborators replaced, without requiring a database.
-    tree = ast.parse((TEMPLATES / "payment_proposal.py").read_text(encoding="utf-8"))
-    klass = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PaymentProposal")
-    method = next(n for n in klass.body if isinstance(n, ast.FunctionDef) and n.name == "create_bank_file")
-    method.decorator_list = []
-    settings = dict(xml_version="09", banking_region="CH", validate_xml=xsd_enabled)
-    account = SimpleNamespace(iban=COMPANY["iban"], bic=COMPANY["bic"])
-    facade = SimpleNamespace(get_doc=Mock(side_effect=[settings, account]), get_value=Mock(return_value="DE"), render_template=Mock(),
-                             throw=Mock(side_effect=ValueError("missing creditor BIC")))
-    scope = dict(frappe=facade, html=html, datetime=datetime, time=SimpleNamespace(strftime=lambda _: "2026-11-05T12:00:00"),
-                 create_message_id=create_message_id, create_payment_file_name=create_payment_file_name,
-                 get_primary_address=lambda **_: None, get_street_name=lambda x: x,
-                 get_building_number=lambda _: "1", is_qr_iban=is_qr_iban,
-                 is_valid_qr_reference=is_valid_qr_reference, creditor_agent_bic=creditor_agent_bic, _=lambda x: x)
-    scope.update(cint=lambda x: int(x or 0), os=os, XML_SCHEMA_FILES={"CH": {"09": "unused.xsd"}},
-                 validate_xml_against_xsd=Mock(return_value=(True, None)))
-    facade.utils = SimpleNamespace(get_bench_path=lambda: "/test")
-    facade.render_template.return_value = "TEST-XML"
-    exec(compile(ast.Module(body=[method], type_ignores=[]), str(TEMPLATES / "payment_proposal.py"), "exec"), scope)
-    row = SimpleNamespace(idx=1, payment_type="IBAN", iban="DE89370400440532013000",
-                          esr_participation_number=None, bic="COBADEFF" if valid_bank else "", execution_date="2026-11-05",
-                          reference="TEST-REF-1", amount=123.45, currency="EUR", receiver="Example",
-                          receiver_address_line1="Testweg 1", receiver_address_line2="8000 Zuerich",
-                          receiver_country="DE", receiver_country_code="DE", receiver_pincode="8000",
-                          receiver_city="Zuerich", is_salary=0)
-    proposal = SimpleNamespace(check_permission=Mock(), company="Example AG", pay_from_account="Test",
-                               name="TEST", payments=[row], get=lambda _: 0)
-    generate = scope["create_bank_file"]
-    context = nullcontext()
-    if os.environ.get("KT_TEST_NATIVE_PAYMENT_IMPORT") == "1":
-        from erpnextswiss.erpnextswiss.doctype.payment_proposal import payment_proposal as native
-        generate = native.PaymentProposal.create_bank_file
-        # Frappe wraps methods for argument validation; patch the implementation
-        # module, not the wrapper's globals, while retaining the actual wrapper.
-        context = patch.dict(vars(native), scope)
-    with context:
-        if valid_bank:
-            assert generate(proposal)["content"] == "TEST-XML"
-            exported = facade.render_template.call_args.args[1]
-            assert exported["payments"][0]["creditor_agent_bic"] == "COBADEFF"
-            assert exported["payments"][0]["amount"] == 123.45
-            assert exported["payments"][0]["service_level"] == "IBAN"
-        else:
-            with pytest.raises(ValueError, match="missing creditor BIC"):
-                generate(proposal)
-            facade.render_template.assert_not_called()
+def test_actual_generation_checks_before_archive_even_without_optional_xsd(xsd_enabled, valid_bank):
+    # The Swiss branch delegates to the shared exporter; schema validation is
+    # mandatory there, independent of the old optional settings checkbox.
+    from datetime import date
+    from decimal import Decimal
+    from hashlib import sha256
+    import json
+    import re
+    from erpnextswiss.erpnextswiss import swiss_payments as bank
+    from erpnextswiss.erpnextswiss.iso20022 import normalize_iban
+    path = ROOT / "erpnextswiss/erpnextswiss/page/payment_export/payment_export.py"
+    nodes = [n for n in ast.parse(path.read_text(encoding="utf-8")).body if isinstance(n, ast.FunctionDef)]
+    for node in nodes:
+        node.decorator_list = []
+    facade = SimpleNamespace(db=Mock(), get_doc=Mock(), get_all=Mock(return_value=[]),
+        throw=Mock(side_effect=lambda text: (_ for _ in ()).throw(ValueError(text))))
+    scope = dict(frappe=facade, _=lambda x:x, Decimal=Decimal, sha256=sha256, json=json, re=re,
+        getdate=lambda x:date.fromisoformat(str(x)[:10]), nowdate=lambda:"2026-11-14",
+        normalize_iban=normalize_iban, is_qr_iban=is_qr_iban, render_credit_transfers=bank.render_credit_transfers)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), scope)
+    row = SimpleNamespace(name="ROW1", idx=1, payment_type="IBAN", iban="DE89370400440532013000",
+        esr_participation_number=None, bic="COBADEFF" if valid_bank else "", execution_date="2026-11-16",
+        reference="TEST-REF-1", amount=123.45, currency="EUR", receiver="Example",
+        receiver_address_line1="Testweg 1", receiver_country="DE", receiver_pincode="8000",
+        receiver_city="Zuerich", esr_reference="", is_salary=0)
+    proposal = SimpleNamespace(check_permission=Mock(), docstatus=1, company="Example AG", pay_from_account="Test",
+        name="TEST", payments=[row])
+    facade.get_doc.return_value=proposal
+    scope.update(_debtor=lambda *a:COMPANY, _country_code=lambda x:x,
+        _archive=Mock(side_effect=lambda result,*a:result))
+    if valid_bank:
+        result=scope["generate_swiss_proposal_file"]("TEST")
+        root=etree.fromstring(result["content"].encode())
+        bank._schema().assertValid(root)
+        assert root.findtext(".//{*}CdtrAgt/{*}FinInstnId/{*}BICFI")=="COBADEFF"
+        assert result["total"]=="123.45"
+        scope["_archive"].assert_called_once()
+    else:
+        with pytest.raises(ValueError, match="BIC"):
+            scope["generate_swiss_proposal_file"]("TEST")
+        scope["_archive"].assert_not_called()
     proposal.check_permission.assert_called_once_with("write")

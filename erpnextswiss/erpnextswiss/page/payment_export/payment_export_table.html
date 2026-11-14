@@ -9,12 +9,12 @@
     </tr>
     {% for payment in payments %}
     <tr>
-        <td><input type="checkbox" id="chk{{ payment.name }}" name="{{ payment.name }}"></td>
-        <td><a href="/desk#Form/Payment Entry/{{ payment.name }}">{{ payment.name }}</a></td>
-        <td>{{ payment.posting_date }}</td>
-        <td>{{ payment.paid_to_account_currency }}&nbsp;{{ payment.paid_amount }}</td>
-        <td>{{ payment.party }}</td>
-        <td>{{ payment.paid_from }}</td>
+        <td><input type="checkbox" name="{{ frappe.utils.escape_html(payment.name) }}" aria-label="{{ frappe.utils.escape_html(payment.name) }}"></td>
+        <td><a href="/app/payment-entry/{{ encodeURIComponent(payment.name) }}">{{ frappe.utils.escape_html(payment.name) }}</a></td>
+        <td>{{ frappe.utils.escape_html(payment.posting_date) }}</td>
+        <td>{{ frappe.utils.escape_html(payment.paid_to_account_currency) }}&nbsp;{{ frappe.utils.escape_html(payment.received_amount) }}</td>
+        <td>{{ frappe.utils.escape_html(payment.party) }}</td>
+        <td>{{ frappe.utils.escape_html(payment.paid_from) }}</td>
     </tr>
     {% endfor %}
 </table>

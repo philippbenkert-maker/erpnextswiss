@@ -1,122 +1,76 @@
-frappe.pages['payment_export'].on_page_load = function(wrapper) {
-	var page = frappe.ui.make_app_page({
-		parent: wrapper,
-		title: 'Zahlungsexport',
-		single_column: true
-	});
-
-	frappe.payment_export.make(page);
-	frappe.payment_export.run(page);
-    
-    // add the application reference
+frappe.pages["payment_export"].on_page_load = function(wrapper) {
+    const page = frappe.ui.make_app_page({parent: wrapper, title: __("Zahlungsexport"), single_column: true});
+    frappe.payment_export.make(page);
+    frappe.payment_export.run(page);
     frappe.breadcrumbs.add("Schweizer Buchhaltung");
-}
+};
 
 frappe.payment_export = {
-	start: 0,
-	make: function(page) {
-		var me = frappe.payment_export;
-		me.page = page;
-		me.body = $('<div></div>').appendTo(me.page.main);
-		var data = "";
-		$(frappe.render_template('payment_export', data)).appendTo(me.body);
-
-		// attach button handlers
-		this.page.main.find(".btn-create-file").on('click', function() {
-			var me = frappe.payment_export;
-			
-            // find selected payments
-            var checkedPayments = findSelected();
-            if (checkedPayments.length > 0) {
-                var payments = [];
-                for (var i = 0; i < checkedPayments.length; i++) {
-                    payments.push(checkedPayments[i].name);
-                }
-                
-                // generate payment file
-                frappe.call({
-                    method: 'erpnextswiss.erpnextswiss.page.payment_export.payment_export.generate_payment_file',
-                    args: { 
-                        'payments': payments
-                    },
-                    callback: function(r) {
-                        if (r.message) {
-                            // log errors if present
-                            var parent = page.main.find(".insert-log-messages").empty();
-                            if (r.message.skipped.length > 0) {
-                                $('<p>Einige Zahlungen wurden wegen Fehlern übersprungen. Details stehen in der Zahlungsdatei:</p>').appendTo(parent);
-                                for (var i = 0; i < r.message.skipped.length; i++) {
-									$('<p><a href="/desk#Form/Payment Entry/'
-									  + r.message.skipped[i] + '">' 
-									  + r.message.skipped[i] + '</a></p>').appendTo(parent);
-								}
-                            }
-                            else {
-                                $('<p>Keine Fehler</p>').appendTo(parent);
-                            }
-
-                            // prepare the xml file for download
-                            download(r.message.file_name || "payments.xml", r.message.content);
-                            
-                            // remove create file button to prevent double payments
-                            page.main.find(".btn-create-file").addClass("hide");
-                            page.main.find(".btn-refresh").removeClass("hide");
-                        } 
-                    }
-                });
-                
-            } else {
-                frappe.msgprint("Bitte mindestens eine Zahlung auswählen.", "Information");
-            }
-		});
-        this.page.main.find(".btn-refresh").on('click', function() {
-            // refresh
-            location.reload(); 
+    make(page) {
+        this.page = page;
+        this.busy = false;
+        this.body = $("<div>").appendTo(page.main);
+        $(frappe.render_template("payment_export", {})).appendTo(this.body);
+        page.main.find(".btn-create-file").on("click", () => this.export_selected(page));
+        page.main.find(".btn-refresh").on("click", () => {
+            page.main.find(".btn-create-file").removeClass("hide");
+            page.main.find(".btn-refresh").addClass("hide");
+            this.run(page);
         });
-	},
-	run: function(page) {  
-		// populate payment entries
-		frappe.call({
-			method: 'erpnextswiss.erpnextswiss.page.payment_export.payment_export.get_payments',
-			args: { },
-			callback: function(r) {
-				if (r.message) {
-					var parent = page.main.find(".payment-table").empty();
-                    if (r.message.payments.length > 0) {
-                        $(frappe.render_template('payment_export_table', r.message)).appendTo(parent);
-                    } else {
-                        $('<p class="text-muted">Keine zahlbaren Zahlungseinträge im Entwurfsstatus gefunden.</p>').appendTo(parent);
-                    }
-				} 
-			}
-		});
-	}
-}
-
-function download(filename, content) {
-  var element = document.createElement('a');
-  element.setAttribute('href', 'data:application/octet-stream;charset=utf-8,' + encodeURIComponent(content));
-  element.setAttribute('download', filename);
-
-  element.style.display = 'none';
-  document.body.appendChild(element);
-
-  element.click();
-
-  document.body.removeChild(element);
-}
-
-function findSelected() {
-    var inputs = document.getElementsByTagName("input"); 
-    var checkboxes = []; 
-    var checked = []; 
-    for (var i = 0; i < inputs.length; i++) {
-      if (inputs[i].type == "checkbox") {
-        checkboxes.push(inputs[i]);
-        if (inputs[i].checked) {
-          checked.push(inputs[i]);
+    },
+    export_selected(page) {
+        if (this.busy) return;
+        const payments = page.main.find(".payment-table input[type=checkbox]:checked")
+            .map(function() { return this.name; }).get();
+        if (!payments.length) {
+            frappe.msgprint(__("Bitte mindestens eine Zahlung auswählen."));
+            return;
         }
-      }
+        this.busy = true;
+        const button = page.main.find(".btn-create-file").prop("disabled", true);
+        frappe.call({
+            method: "erpnextswiss.erpnextswiss.page.payment_export.payment_export.generate_payment_file",
+            type: "POST", args: {payments}, btn: button, freeze: true,
+            freeze_message: __("Zahlungen vollständig prüfen und Zahlungsoriginal sichern …"),
+            callback: r => {
+                if (!r.message) return;
+                const result = r.message;
+                const log = page.main.find(".insert-log-messages").empty();
+                $("<p>").text(__("Zahlungen geprüft und gebucht. Die Zahlungsdatei ist zur Einreichung bei Ihrer Bank bereit.")).appendTo(log);
+                if (result.file_url) {
+                    $("<a>").attr({href: result.file_url, download: result.file_name})
+                        .text(__("Gesichertes Zahlungsoriginal erneut herunterladen")).appendTo(log);
+                }
+                button.addClass("hide");
+                page.main.find(".btn-refresh").removeClass("hide");
+                this.download(result.file_name || "payments.xml", result.content);
+            },
+            always: () => { this.busy = false; button.prop("disabled", false); }
+        });
+    },
+    run(page) {
+        frappe.call({
+            method: "erpnextswiss.erpnextswiss.page.payment_export.payment_export.get_payments",
+            callback: r => {
+                if (!r.message) return;
+                const parent = page.main.find(".payment-table").empty();
+                if (r.message.payments.length) {
+                    $(frappe.render_template("payment_export_table", r.message)).appendTo(parent);
+                } else {
+                    $("<p>").addClass("text-muted").text(__("Keine zahlbaren Zahlungseinträge im Entwurfsstatus gefunden.")).appendTo(parent);
+                }
+            }
+        });
+    },
+    download(filename, content) {
+        const url = URL.createObjectURL(new Blob([content], {type: "application/xml;charset=utf-8"}));
+        const element = document.createElement("a");
+        element.href = url;
+        element.download = filename;
+        element.style.display = "none";
+        document.body.appendChild(element);
+        element.click();
+        element.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
-    return checked;
-}
+};

@@ -38,7 +38,7 @@ def creditor_agent_bic(payment, region):
 
 def is_qr_iban(iban):
     normalized = normalize_iban(iban)
-    if len(normalized) != 21 or not normalized.startswith("CH"):
+    if len(normalized) != 21 or normalized[:2] not in ("CH", "LI"):
         return False
     qr_iid = normalized[4:9]
     return qr_iid.isdigit() and 30000 <= int(qr_iid) <= 31999

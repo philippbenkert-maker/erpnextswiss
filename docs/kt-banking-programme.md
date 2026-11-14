@@ -1,5 +1,7 @@
 # KT Banking: verbindliche Erweiterung des Plattformziels
 
+Aktuelle Bestandsaufnahme und Verbesserungen: [Schweizer Buchhaltung, 14. November 2026](swiss-accounting-review-20261114.md). Der unten dokumentierte Status vom September bleibt als historische Projektgrundlage erhalten.
+
 Stand: 13.09.2026. Auftrag: Bankanbindung anhand des Banking-Briefings verbessern,
 updatefest innerhalb der vorhandenen Swiss-App. Bestehenden Zahlungsabgleich und
 bestehende Zahlungsvorschlaege integrieren, nicht neu entwickeln.

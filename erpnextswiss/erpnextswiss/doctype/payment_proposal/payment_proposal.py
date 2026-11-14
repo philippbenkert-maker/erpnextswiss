@@ -422,6 +422,12 @@ class PaymentProposal(Document):
         self.check_permission("write")
         data = {}
         settings = frappe.get_doc("ERPNextSwiss Settings", "ERPNextSwiss Settings")
+        # Swiss exports always use the current SPS format, including mandatory
+        # schema validation and a reusable private original. Other regions keep
+        # their configured format.
+        if settings.get("banking_region") == "CH":
+            from erpnextswiss.erpnextswiss.page.payment_export.payment_export import generate_swiss_proposal_file
+            return generate_swiss_proposal_file(self.name)
         data['xml_version'] = settings.get("xml_version")
         data['xml_region'] = settings.get("banking_region")
         data['msgid'] = create_message_id()                                  # message ID (unique, SWIFT-characters only)

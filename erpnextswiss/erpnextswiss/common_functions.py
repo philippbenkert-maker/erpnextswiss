@@ -52,25 +52,19 @@ def get_city(address_line):
 # target types: Customer, Supplier, Company
 @frappe.whitelist()
 def get_primary_address(target_name, target_type="Customer"):
-    sql_query = """SELECT 
-            `tabAddress`.`address_line1`, 
-            `tabAddress`.`address_line2`, 
-            `tabAddress`.`pincode`, 
-            `tabAddress`.`city`, 
-            `tabAddress`.`county`,
-            `tabAddress`.`country`, 
-            UPPER(`tabCountry`.`code`) AS `country_code`, 
-            `tabAddress`.`is_primary_address`
-        FROM `tabDynamic Link` 
-        LEFT JOIN `tabAddress` ON `tabDynamic Link`.`parent` = `tabAddress`.`name`
-        LEFT JOIN `tabCountry` ON `tabAddress`.`country` = `tabCountry`.`name`
-        WHERE `link_doctype` = '{type}' AND `link_name` = '{name}'
-        ORDER BY `tabAddress`.`is_primary_address` DESC
-        LIMIT 1;""".format(type=target_type, name=target_name)
-    try:
-        return frappe.db.sql(sql_query, as_dict=True)[0]
-    except:
-        return None
+    if target_type not in ("Customer", "Supplier", "Company"):
+        frappe.throw(_("Unsupported address owner."))
+    frappe.get_doc(target_type, target_name).check_permission("read")
+    rows = frappe.db.sql("""SELECT a.address_line1, a.address_line2,
+            a.pincode, a.city, a.county, a.country,
+            UPPER(c.code) AS country_code, a.is_primary_address
+        FROM `tabDynamic Link` l
+        INNER JOIN `tabAddress` a ON l.parent = a.name
+        LEFT JOIN `tabCountry` c ON a.country = c.name
+        WHERE l.link_doctype = %s AND l.link_name = %s AND l.parenttype = 'Address'
+        ORDER BY a.is_primary_address DESC, a.name ASC LIMIT 1""",
+        (target_type, target_name), as_dict=True)
+    return rows[0] if rows else None
 
 """
     This function will compute a SCOR structured creditor reference from a regular reference of max. 21 alphanumeric characters

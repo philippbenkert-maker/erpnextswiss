@@ -1,61 +1,48 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2017-2023, libracore (https://www.libracore.com) and contributors
-# License: AGPL v3. See LICENCE
+"""Direct payment and payroll exports with complete preflight and private originals."""
+from decimal import Decimal
+from hashlib import sha256
+import json
+import re
 
-from __future__ import unicode_literals
 import frappe
-from frappe import throw, _
-from frappe.utils import cint
-import time
-from erpnextswiss.erpnextswiss.common_functions import get_building_number, get_street_name, get_pincode, get_city
-from erpnextswiss.erpnextswiss.iso20022 import create_message_id, create_payment_file_name
-import html              # used to escape xml content
+from frappe import _
+from frappe.utils import cint, getdate, nowdate
+
+from erpnextswiss.erpnextswiss.iso20022 import create_payment_file_name, is_qr_iban, normalize_iban
+from erpnextswiss.erpnextswiss.swiss_payments import payment_amount, render_credit_transfers
+
 
 @frappe.whitelist()
 def get_payments():
-    payments = frappe.get_list('Payment Entry', 
-        filters={'docstatus': 0, 'payment_type': 'Pay'}, 
-        fields=['name', 'posting_date', 'paid_amount', 'party', 'paid_from', 'paid_to_account_currency'], 
-        order_by='posting_date')
-    
-    return { 'payments': payments }
+    frappe.only_for(("Accounts User", "Accounts Manager", "System Manager"))
+    return {"payments": frappe.get_list("Payment Entry",
+        filters={"docstatus": 0, "payment_type": "Pay"},
+        fields=["name", "posting_date", "received_amount", "party", "paid_from", "paid_to_account_currency"],
+        order_by="posting_date, name", limit_page_length=0)}
+
 
 def _truthy(value, default=False):
     if value is None or value == "":
         return default
-    if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes", "y", "ja")
-    return bool(value)
-
-
-def _optional_float(value, fieldname):
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)
-    except Exception:
-        frappe.throw(_("{0} must be a number.").format(fieldname))
-
-
-def _optional_int(value, fieldname):
-    if value is None or value == "":
-        return None
-    try:
-        return cint(value)
-    except Exception:
-        frappe.throw(_("{0} must be a whole number.").format(fieldname))
+    return value.strip().lower() in ("1", "true", "yes", "y", "ja") if isinstance(value, str) else bool(value)
 
 
 def _assert_expected_total(actual, expected_total):
-    expected = _optional_float(expected_total, "expected_total")
-    if expected is not None and round(abs(float(actual or 0) - expected), 2) > 0:
-        frappe.throw(_("Expected total {0} does not match calculated total {1:.2f}.").format(expected, float(actual or 0)))
+    if expected_total is None or expected_total == "":
+        return
+    try:
+        expected = Decimal(str(expected_total))
+        if not expected.is_finite() or expected != actual:
+            raise ValueError
+    except (ValueError, ArithmeticError):
+        frappe.throw(_("The expected total does not match the validated payment total."))
 
 
 def _assert_expected_count(actual, expected_count, fieldname):
-    expected = _optional_int(expected_count, fieldname)
-    if expected is not None and cint(actual) != expected:
-        frappe.throw(_("Expected {0} {1} does not match calculated value {2}.").format(fieldname, expected, actual))
+    if expected_count is None or expected_count == "":
+        return
+    if str(expected_count).strip() != str(actual):
+        frappe.throw(_("The expected payment count does not match the selected entries."))
 
 
 def _require_confirmed(confirm, action):
@@ -64,724 +51,253 @@ def _require_confirmed(confirm, action):
 
 
 def _parse_payment_names(payments):
-    payment_names = frappe.parse_json(payments) if isinstance(payments, str) else payments
-    payment_names = list(filter(None, payment_names or []))
-    seen = set()
-    unique_names = []
-    for payment_name in payment_names:
-        payment_name = str(payment_name)
-        if payment_name in seen:
-            continue
-        seen.add(payment_name)
-        unique_names.append(payment_name)
-    return unique_names
+    names = frappe.parse_json(payments) if isinstance(payments, str) else payments
+    if not isinstance(names, (list, tuple)) or not names or len(names) > 1000:
+        frappe.throw(_("Please select between 1 and 1000 payments."))
+    if any(not isinstance(name, str) or not name.strip() for name in names):
+        frappe.throw(_("Invalid payment selection."))
+    return list(dict.fromkeys(names))
+
+
+def _country_code(country):
+    if not country:
+        frappe.throw(_("The payment address needs an explicit country."))
+    code = frappe.db.get_value("Country", country, "code")
+    if not code and re.fullmatch(r"[A-Za-z]{2}", country):
+        code = frappe.db.get_value("Country", {"code": country.lower()}, "code")
+    if not code:
+        frappe.throw(_("Unknown payment address country: {0}").format(frappe.utils.escape_html(country)))
+    return code.upper()
+
+
+def _street_parts(line):
+    match = re.fullmatch(r"(.+?)\s+(\d+\S*)", (line or "").strip())
+    return (match[1], match[2]) if match else ((line or "").strip(), "")
+
+
+def get_billing_address(party_name, party_type="Supplier"):
+    if party_type not in ("Company", "Customer", "Supplier", "Employee"):
+        frappe.throw(_("Unsupported payment party type."))
+    links = frappe.get_all("Dynamic Link", filters={"link_doctype": party_type,
+        "link_name": party_name, "parenttype": "Address"}, fields=["parent"], order_by="parent")
+    addresses = [frappe.get_doc("Address", row.parent) for row in links]
+    addresses.sort(key=lambda doc: (
+        not (doc.address_type == "Billing" and doc.is_primary_address),
+        doc.address_type != "Billing", not bool(doc.is_primary_address), doc.name))
+    return addresses[0] if addresses else None
+
+
+def _party_address(party_name, party_type, display_name=None):
+    address = get_billing_address(party_name, party_type)
+    if address:
+        street, building = _street_parts(address.address_line1)
+        return dict(name=display_name or party_name, street=street, building=building,
+                    pincode=address.pincode, city=address.city, country_code=_country_code(address.country))
+    if party_type == "Employee":
+        employee = frappe.get_doc("Employee", party_name)
+        lines = [line.strip() for line in (employee.permanent_address or employee.current_address or "").splitlines() if line.strip()]
+        if len(lines) >= 3:
+            postcode, separator, city = lines[-2].partition(" ")
+            if separator and city:
+                street, building = _street_parts(lines[0])
+                return dict(name=display_name or employee.employee_name, street=street, building=building,
+                            pincode=postcode, city=city, country_code=_country_code(lines[-1]))
+    frappe.throw(_("{0}: add a linked payment address with town and country. For an employee, a three-line address with the country on the last line is also supported.").format(frappe.utils.escape_html(party_name)))
+
+
+def _debtor(company_name, account_name):
+    account = frappe.get_doc("Account", account_name)
+    if account.company != company_name or account.disabled or account.is_group or account.account_type != "Bank":
+        frappe.throw(_("The paying account must be an active bank account of the selected company."))
+    debtor = _party_address(company_name, "Company")
+    debtor.update(iban=account.iban, bic=account.bic)
+    return debtor
 
 
 def _validate_payment_entries_for_export(payment_names):
-    total = 0.0
-    errors = []
-    records = []
-
-    for payment_name in payment_names:
-        try:
-            payment_record = frappe.get_doc("Payment Entry", payment_name)
-            payment_record.check_permission("write")
-        except Exception as err:
-            errors.append(_("{0}: cannot read payment entry ({1})").format(payment_name, err))
-            continue
-
-        if payment_record.docstatus != 0:
-            errors.append(_("{0}: payment entry is not a draft").format(payment_name))
-        if payment_record.payment_type != "Pay":
-            errors.append(_("{0}: payment entry is not a Pay entry").format(payment_name))
-
-        try:
-            payment_account = frappe.get_doc("Account", payment_record.paid_from)
-            if not payment_account.iban:
-                errors.append(_("{0}: no account IBAN found ({1})").format(payment_name, payment_record.paid_from))
-        except Exception as err:
-            errors.append(_("{0}: cannot read paying account ({1})").format(payment_name, err))
-
-        creditor_info = add_creditor_info(payment_record)
-        if not creditor_info:
-            errors.append(_("{0}: no creditor address or country found").format(payment_name))
-
-        if payment_record.transaction_type == "ESR":
-            if not payment_record.esr_participant_number:
-                errors.append(_("{0}: no ESR participation number found").format(payment_name))
-            if not payment_record.esr_reference:
-                errors.append(_("{0}: no ESR reference found").format(payment_name))
-        elif not payment_record.iban:
-            errors.append(_("{0}: no IBAN found").format(payment_name))
-
-        total += float(payment_record.paid_amount or 0)
-        records.append(payment_record)
-
-    if errors:
-        frappe.throw("<br>".join(errors))
-
+    records, total = [], Decimal(0)
+    company = None
+    for name in payment_names:
+        record = frappe.get_doc("Payment Entry", name)
+        record.check_permission("write")
+        record.check_permission("submit")
+        if record.docstatus != 0 or record.payment_type != "Pay":
+            frappe.throw(_("{0}: only draft outgoing payments can be exported. Previously exported originals remain attached to their payment entries.").format(frappe.utils.escape_html(name)))
+        if company and company != record.company:
+            frappe.throw(_("Select payment entries from one company per file."))
+        company = record.company
+        total += payment_amount(record.received_amount)
+        records.append(record)
     return records, total
+
+
+def _payment_row(record):
+    method = record.transaction_type or "IBAN"
+    iban = normalize_iban(record.iban)
+    participant = normalize_iban(record.esr_participant_number)
+    if method == "ESR":
+        if not (is_qr_iban(participant) or is_qr_iban(iban)):
+            frappe.throw(_("{0}: legacy ESR payments are no longer supported; enter the current IBAN or QR-IBAN.").format(frappe.utils.escape_html(record.name)))
+        iban, method = participant if is_qr_iban(participant) else iban, "QRR"
+    party = frappe.get_doc(record.party_type, record.party)
+    display = party.get("employee_name") or party.get("supplier_name") or party.get("customer_name") or record.party
+    return dict(name=record.name, execution_date=max(getdate(record.posting_date), getdate(nowdate())).isoformat(),
+        amount=record.received_amount, currency=record.paid_to_account_currency,
+        iban=iban, bic=record.bic, service_level=method, qr_reference=record.esr_reference,
+        reference=record.reference_no or record.name,
+        creditor=_party_address(record.party, record.party_type, display),
+        debtor=_debtor(record.company, record.paid_from))
+
+
+def _archive(result, doctype, names, file_name=None):
+    from frappe.utils.file_manager import save_file
+    file_name = file_name or create_payment_file_name(result["message_id"])
+    urls = []
+    for name in names:
+        original = save_file(file_name, result["content"], doctype, name, is_private=1)
+        urls.append(original.file_url)
+    result.update(file_name=file_name, file_url=urls[0])
+    return result
+
+
+def _generate_payment_export(payments, expected_total=None, expected_count=None):
+    names = _parse_payment_names(payments)
+    # Sorted row locks serialize double clicks and concurrent API requests. Locks
+    # remain held until Frappe commits the successful POST or rolls it back.
+    for name in sorted(names):
+        frappe.db.sql("SELECT name FROM `tabPayment Entry` WHERE name=%s FOR UPDATE", (name,))
+    records, total = _validate_payment_entries_for_export(names)
+    _assert_expected_total(total, expected_total)
+    _assert_expected_count(len(records), expected_count, "expected_count")
+    try:
+        result = render_credit_transfers([_payment_row(record) for record in records])
+    except ValueError as error:
+        frappe.throw(str(error))
+    # No partial export: every transaction and the complete Swiss schema must
+    # pass before any document is submitted. Roll back even if a caller catches.
+    savepoint = "swiss_payment_export"
+    frappe.db.savepoint(savepoint)
+    try:
+        result = _archive(result, "Payment Entry", names)
+        for record in records:
+            record.submit()
+    except Exception:
+        frappe.db.rollback(save_point=savepoint)
+        raise
+    result.update(payment_entries=names)
+    return result
+
+
+@frappe.whitelist(methods=["POST"])
+def generate_payment_file(payments):
+    frappe.only_for(("Accounts User", "Accounts Manager", "System Manager"))
+    return _generate_payment_export(payments)
 
 
 @frappe.whitelist(methods=["POST"])
 def generate_payment_file_for_mcp(payments, expected_total=None, expected_count=None, confirm=0, reason=None):
     frappe.only_for(("Accounts User", "Accounts Manager", "System Manager"))
     _require_confirmed(confirm, "generating and submitting a payment export")
+    result = _generate_payment_export(payments, expected_total, expected_count)
+    return dict(result, success=True)
 
-    payment_names = _parse_payment_names(payments)
-    if not payment_names:
-        frappe.throw(_("Please select at least one payment."))
 
-    records, total = _validate_payment_entries_for_export(payment_names)
-    _assert_expected_total(total, expected_total)
-    _assert_expected_count(len(records), expected_count, "expected_count")
+def _payroll_rows(payroll_record):
+    names = frappe.get_all("Salary Slip", filters={"payroll_entry": payroll_record.name,
+        "company": payroll_record.company, "docstatus": ["!=", 2]}, fields=["name"],
+        order_by="employee, name", limit_page_length=0)
+    if not names:
+        frappe.throw(_("No submitted salary slips linked to this payroll entry were found."))
+    employees = {row.employee for row in payroll_record.employees}
+    debtor = _debtor(payroll_record.company, payroll_record.payment_account)
+    rounding_disabled = cint(frappe.db.get_single_value("Payroll Settings", "disable_rounded_total"))
+    rows, seen = [], set()
+    for item in names:
+        slip = frappe.get_doc("Salary Slip", item.name)
+        slip.check_permission("read")
+        if (slip.docstatus != 1 or slip.payroll_entry != payroll_record.name or slip.company != payroll_record.company
+            or slip.employee not in employees or slip.employee in seen
+            or getdate(slip.start_date) != getdate(payroll_record.start_date)
+            or getdate(slip.end_date) != getdate(payroll_record.end_date)):
+            frappe.throw(_("Salary slips do not match the employees and period of the selected payroll entry."))
+        seen.add(slip.employee)
+        amount = slip.net_pay if rounding_disabled or slip.rounded_total is None else slip.rounded_total
+        if Decimal(str(amount or 0)) == 0:
+            continue
+        rows.append(dict(name=slip.name, execution_date=max(getdate(slip.posting_date), getdate(nowdate())).isoformat(),
+            amount=amount, currency=slip.currency, iban=slip.bank_account_no, is_salary=True,
+            service_level="IBAN", reference=slip.name, bic=frappe.db.get_value("Employee", slip.employee, "bic"),
+            creditor=_party_address(slip.employee, "Employee", slip.employee_name), debtor=debtor))
+    if seen != employees:
+        frappe.throw(_("Not every employee in this payroll entry has a matching submitted salary slip. Complete the payroll before exporting."))
+    return rows
 
-    result = generate_payment_file(payment_names)
-    if not result:
-        frappe.throw(_("Payment export did not return a file."))
-    if result.get("skipped"):
-        frappe.throw(_("Payment export skipped entries: {0}").format(", ".join(result.get("skipped"))))
-
-    return {
-        "success": True,
-        "count": len(records),
-        "total": total,
-        "payment_entries": [record.name for record in records],
-        "file_name": result.get("file_name"),
-        "message_id": result.get("message_id"),
-        "content": result.get("content"),
-        "skipped": result.get("skipped") or [],
-    }
-
-@frappe.whitelist(methods=["POST"])
-def generate_payment_file(payments):
-    frappe.only_for(("Accounts User", "Accounts Manager", "System Manager"))
-    # creates a pain.001 payment file from the selected payments
-
-    try:
-        # convert JavaScript parameter into Python array
-        payments = frappe.parse_json(payments) if isinstance(payments, str) else payments
-        # remove empty items in case there should be any (bigfix for issue #2)
-        payments = list(filter(None, payments))
-        
-        # array for skipped payments
-        skipped = []
-        
-        # create xml header
-        content = make_line("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-        # define xml template reference
-        content += make_line("<Document xmlns=\"http://www.six-interbank-clearing.com/de/pain.001.001.03.ch.02.xsd\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.six-interbank-clearing.com/de/pain.001.001.03.ch.02.xsd  pain.001.001.03.ch.02.xsd\">")
-        # transaction holder
-        content += make_line("  <CstmrCdtTrfInitn>")
-        ### Group Header (GrpHdr, A-Level)
-        # create group header
-        content += make_line("    <GrpHdr>")
-        # message ID (unique, SWIFT-characters only)
-        message_id = create_message_id()
-        content += make_line("      <MsgId>" + message_id + "</MsgId>")
-        # creation date and time ( e.g. 2010-02-15T07:30:00 )
-        content += make_line("      <CreDtTm>" + time.strftime("%Y-%m-%dT%H:%M:%S") + "</CreDtTm>")
-        # number of transactions in the file
-        transaction_count = 0
-        transaction_count_identifier = "<!-- $COUNT -->"
-        content += make_line("      <NbOfTxs>" + transaction_count_identifier + "</NbOfTxs>")
-        # total amount of all transactions ( e.g. 15850.00 )  (sum of all amounts)
-        control_sum = 0.0
-        control_sum_identifier = "<!-- $CONTROL_SUM -->"
-        content += make_line("      <CtrlSum>" + control_sum_identifier + "</CtrlSum>")
-        # initiating party requires at least name or identification
-        content += make_line("      <InitgPty>")
-        # initiating party name ( e.g. MUSTER AG )
-        content += make_line("        <Nm>" + get_company_name(payments[0]) + "</Nm>")
-        content += make_line("      </InitgPty>")
-        content += make_line("    </GrpHdr>")
-        
-        ### Payment Information (PmtInf, B-Level)
-        # payment information records (1 .. 99'999)
-        for payment in payments:
-            # create temporary code block to compile the payment record (only add to overall on submit)
-            # use 'continue' to skip a record (in case a validation fails)
-            payment_content = ""
-            # retrieve the payment entry record
-            payment_record = frappe.get_doc('Payment Entry', payment)
-            # create the payment entries
-            payment_content += make_line("    <PmtInf>")
-            # unique (in this file) identification for the payment ( e.g. PMTINF-01, PMTINF-PE-00005 )
-            payment_content += make_line("      <PmtInfId>PMTINF-" + payment + "</PmtInfId>")
-            # payment method (TRF or TRA, no impact in Switzerland)
-            payment_content += make_line("      <PmtMtd>TRF</PmtMtd>")
-            # batch booking (true or false; recommended true)
-            payment_content += make_line("      <BtchBookg>true</BtchBookg>")
-            # Requested Execution Date (e.g. 2010-02-22)
-            payment_content += make_line("      <ReqdExctnDt>{0}</ReqdExctnDt>".format(
-                payment_record.posting_date))
-            # debitor (technically ignored, but recommended)   
-            payment_content += make_line("      <Dbtr>")
-            # debitor name
-            payment_content += make_line("        <Nm>" +
-                html.escape(payment_record.company) + "</Nm>")
-            # postal address (recommendadtion: do not use)
-            #content += make_line("        <PstlAdr>")
-            #content += make_line("          <Ctry>CH</Ctry>")
-            #content += make_line("          <AdrLine>SELDWYLA</AdrLine>")
-            #content += make_line("        </PstlAdr>")
-            payment_content += make_line("      </Dbtr>")
-            # debitor account (sender) - IBAN
-            payment_account = frappe.get_doc('Account', payment_record.paid_from)
-            payment_content += make_line("      <DbtrAcct>")
-            payment_content += make_line("        <Id>")
-            if payment_account.iban:
-                payment_content += make_line("          <IBAN>{0}</IBAN>".format(
-                    payment_account.iban.replace(" ", "") ))
-            else:
-                # no paying account IBAN: not valid record, skip
-                content += add_invalid_remark( _("{0}: no account IBAN found ({1})".format(
-                    payment, payment_record.paid_from) ) )
-                skipped.append(payment)
-                continue
-            payment_content += make_line("        </Id>")
-            payment_content += make_line("      </DbtrAcct>")
-            if payment_account.bic:
-                # debitor agent (sender) - BIC
-                payment_content += make_line("      <DbtrAgt>")
-                payment_content += make_line("        <FinInstnId>")
-                payment_content += make_line("          <BIC>{0}</BIC>".format(payment_account.bic))
-                payment_content += make_line("        </FinInstnId>")
-                payment_content += make_line("      </DbtrAgt>")
-                
-            ### Credit Transfer Transaction Information (CdtTrfTxInf, C-Level)
-            payment_content += make_line("      <CdtTrfTxInf>")
-            # payment identification
-            payment_content += make_line("        <PmtId>")
-            # instruction identification 
-            payment_content += make_line("          <InstrId>INSTRID-" + payment + "</InstrId>")
-            # end-to-end identification (should be used and unique within B-level; payment entry name)
-            payment_content += make_line("          <EndToEndId>" + payment + "</EndToEndId>")
-            payment_content += make_line("        </PmtId>")
-            # payment type information
-            payment_content += make_line("        <PmtTpInf>")
-            # service level: only used for SEPA (currently not implemented)
-            if payment_record.transaction_type == "SEPA":
-                payment_content += make_line("          <SvcLvl>")
-                # service level code (e.g. SEPA)
-                payment_content += make_line("            <Cd>SEPA</Cd>")
-                payment_content += make_line("          </SvcLvl>")
-            # local instrument
-            if payment_record.transaction_type == "ESR":
-                payment_content += make_line("          <LclInstrm>")
-                # proprietary (nothing or CH01 for ESR)        
-                payment_content += make_line("            <Prtry>CH01</Prtry>")
-                payment_content += make_line("          </LclInstrm>")        
-            payment_content += make_line("        </PmtTpInf>")
-            # amount 
-            payment_content += make_line("        <Amt>")
-            payment_content += make_line("          <InstdAmt Ccy=\"{0}\">{1:.2f}</InstdAmt>".format(
-                payment_record.paid_from_account_currency,
-                payment_record.paid_amount))
-            payment_content += make_line("        </Amt>")
-            # creditor account
-            # creditor account identification
-            if payment_record.transaction_type == "ESR":
-                # add creditor information
-                creditor_info = add_creditor_info(payment_record)
-                if creditor_info:
-                    payment_content += creditor_info
-                else:
-                    # no address found, skip entry (not valid)
-                    content += add_invalid_remark( _("{0}: no address (or country) found").format(payment) )
-                    skipped.append(payment)
-                    continue
-                # ESR payment
-                payment_content += make_line("        <CdtrAcct>")
-                payment_content += make_line("          <Id>")
-                payment_content += make_line("            <Othr>")
-                # ESR participant number
-                if payment_record.esr_participant_number:
-                    payment_content += make_line("              <Id>" +
-                        payment_record.esr_participant_number + "</Id>")
-                else:
-                    # no particpiation number: not valid record, skip
-                    content += add_invalid_remark( _("{0}: no ESR participation number found").format(payment) )
-                    skipped.append(payment)
-                    continue
-                payment_content += make_line("            </Othr>")
-                payment_content += make_line("          </Id>")
-                payment_content += make_line("        </CdtrAcct>")
-                # Remittance Information
-                payment_content += make_line("        <RmtInf>")
-                payment_content += make_line("          <Strd>")
-                # Creditor Reference Information
-                payment_content += make_line("            <CdtrRefInf>")
-                # ESR reference 
-                if payment_record.esr_reference:
-                    payment_content += make_line("              <Ref>" +
-                        payment_record.esr_reference.replace(" ", "") + "</Ref>")
-                else:
-                    # no ESR reference: not valid record, skip
-                    content += add_invalid_remark( _("{0}: no ESR reference found").format(payment) )
-                    skipped.append(payment)
-                    continue    
-                payment_content += make_line("            </CdtrRefInf>")
-                payment_content += make_line("          </Strd>")
-                payment_content += make_line("        </RmtInf>")
-            else:
-                # IBAN or SEPA payment
-                # add creditor information
-                creditor_info = add_creditor_info(payment_record)
-                if creditor_info:
-                    payment_content += creditor_info
-                else:
-                    # no address found, skip entry (not valid)
-                    content += add_invalid_remark( _("{0}: no address (or country) found").format(payment) )
-                    skipped.append(payment)
-                    continue
-                # creditor agent (BIC, optional; removed to resolve issue #15)
-                #if payment_record.bic:                
-                #    payment_content += make_line("        <CdtrAgt>")
-                #    payment_content += make_line("          <FinInstnId>")
-                #    payment_content += make_line("            <BIC>" + 
-                #        payment_record.bic + "</BIC>")
-                #    payment_content += make_line("          </FinInstnId>")
-                #    payment_content += make_line("        </CdtrAgt>")    
-                # creditor account
-                payment_content += make_line("        <CdtrAcct>")
-                payment_content += make_line("          <Id>")
-                if payment_record.iban:
-                    payment_content += make_line("            <IBAN>{0}</IBAN>".format( 
-                        payment_record.iban.replace(" ", "") ))
-                else:
-                    # no iban: not valid record, skip
-                    content += add_invalid_remark( _("{0}: no IBAN found").format(payment) )
-                    skipped.append(payment)
-                    continue
-                payment_content += make_line("          </Id>")
-                payment_content += make_line("        </CdtrAcct>")
-                                        
-            # close payment record
-            payment_content += make_line("      </CdtTrfTxInf>")
-            payment_content += make_line("    </PmtInf>")
-            # once the payment is extracted for payment, submit the record
-            transaction_count += 1
-            control_sum += payment_record.paid_amount
-            content += payment_content
-            payment_record.submit()
-        # add footer
-        content += make_line("  </CstmrCdtTrfInitn>")
-        content += make_line("</Document>")
-        # insert control numbers
-        content = content.replace(transaction_count_identifier, "{0}".format(transaction_count))
-        content = content.replace(control_sum_identifier, "{:.2f}".format(control_sum))
-        
-        return {
-            'content': content,
-            'skipped': skipped,
-            'file_name': create_payment_file_name(message_id),
-            'message_id': message_id
-        }
-    except IndexError:
-        frappe.msgprint( _("Please select at least one payment."), _("Information") )
-        return
-    except:
-        frappe.throw( _("Error while generating xml. Make sure that you made required customisations to the DocTypes.") )
-        return
-
-def add_creditor_info(payment_record):
-    payment_content = ""
-    # creditor information
-    payment_content += make_line("        <Cdtr>") 
-    # name of the creditor/supplier
-    name = payment_record.party
-    if payment_record.party_type == "Employee":
-        name = frappe.get_value("Employee", payment_record.party, "employee_name")
-    payment_content += make_line("          <Nm>" + name  + "</Nm>")
-    # address of creditor/supplier (should contain at least country and first address line
-    # get supplier address
-    if payment_record.party_type == "Supplier" or payment_record.party_type == "Customer":
-        supplier_address = get_billing_address(payment_record.party, payment_record.party_type)
-        if supplier_address == None:
-            return None
-        street = get_street_name(supplier_address.address_line1)
-        building = get_building_number(supplier_address.address_line1)
-        plz = supplier_address.pincode
-        city = supplier_address.city 
-        # country (has to be a two-digit code)
-        try:
-            country_code = frappe.get_value('Country', supplier_address.country, 'code').upper()
-        except:
-            country_code = "CH"
-    elif payment_record.party_type == "Employee":
-        employee = frappe.get_doc("Employee", payment_record.party)
-        if employee.permanent_address:
-           address = employee.permanent_address
-        elif employee.current_address:
-            address = employee.current_address
-        else:
-            # no address found
-            return None
-        try:
-            lines = address.split("\n")
-            street = get_street_name(lines[0])
-            building = get_building_number(lines[0])
-            plz = get_pincode(lines[1])
-            city = get_city(lines[1])
-            country_code = "CH"                
-        except:
-            # invalid address
-            return None
-    else:
-        # unknown supplier type
-        return None
-    payment_content += make_line("          <PstlAdr>")
-    # street name
-    payment_content += make_line("            <StrtNm>" + street + "</StrtNm>")
-    # building number
-    payment_content += make_line("            <BldgNb>" + building + "</BldgNb>")
-    # postal code
-    payment_content += make_line("            <PstCd>{0}</PstCd>".format(plz))
-    # town name
-    payment_content += make_line("            <TwnNm>" + city + "</TwnNm>")
-    payment_content += make_line("            <Ctry>" + country_code + "</Ctry>")
-    payment_content += make_line("          </PstlAdr>")
-    payment_content += make_line("        </Cdtr>") 
-    return payment_content
-            
-def get_total_amount(payments):
-    # get total amount from all payments
-    total_amount = float(0)
-    for payment in payments:
-        payment_amount = frappe.get_value('Payment Entry', payment, 'paid_amount')
-        total_amount += payment_amount
-        
-    return total_amount
-
-def get_company_name(payment_entry):
-    return frappe.get_value('Payment Entry', payment_entry, 'company')
-
-# adds Windows-compatible line endings (to make the xml look nice)    
-def make_line(line):
-    return line + "\r\n"
-
-# add a remark if a payment entry was skipped
-def add_invalid_remark(remark):
-    return make_line("    <!-- " + remark + " -->")
-    
-# try to find the optimal billing address
-def get_billing_address(supplier_name, supplier_type="Supplier"):
-    if supplier_type == "Customer":
-        linked_addresses = frappe.get_all('Dynamic Link', 
-        filters={
-            'link_doctype': 'customer', 
-            'link_name': supplier_name, 
-            'parenttype': 'Address'
-        }, 
-        fields=['parent'])         
-    else:
-        linked_addresses = frappe.get_all('Dynamic Link', 
-        filters={
-            'link_doctype': 'supplier', 
-            'link_name': supplier_name, 
-            'parenttype': 'Address'
-        }, 
-        fields=['parent'])     
-    if len(linked_addresses) > 0:
-        if len(linked_addresses) > 1:
-            for address_name in linked_addresses:
-                address = frappe.get_doc('Address', address_name)            
-                if address.address_type == "Billing":
-                    # this is a billing address, keep as option
-                    billing_address = address
-                    if address.is_primary_address == 1:
-                        # this is the primary billing address
-                        return address
-                if address.is_primary_address == 1:
-                    # this is a primary but not billing address
-                    primary_address = address
-            # evaluate best address found
-            if billing_address:
-                # found one or more billing address (but no primary)
-                return billing_address
-            elif primary_address:
-                # found no billing but a primary address
-                return primary_address
-            else:
-                # found neither billing nor a primary address
-                return frappe.get_doc('Address', linked_addresses[0].parent)
-        else:
-            # return the one (and only) address 
-            return frappe.get_doc('Address', linked_addresses[0].parent)
-    else:
-        # no address found
-        return None
 
 @frappe.whitelist(methods=["POST"])
 def generate_payment_file_from_payroll(payroll_entry):
     frappe.only_for(("Accounts User", "Accounts Manager", "HR Manager", "System Manager"))
-    payroll_record = frappe.get_doc("Payroll Entry", payroll_entry)
-    payroll_record.check_permission("read")
-    payments = []
-    # note: find by matching time range as there is a known issue that the link does not work (v10)
-    salary_slips = frappe.get_all("Salary Slip",
-        filters={'start_date': payroll_record.start_date,
-            'end_date': payroll_record.end_date,
-            'docstatus': 1
-        }, fields=['name', 'posting_date', 'rounded_total', 'employee_name', 'employee', 'bank_account_no'])
-    company = frappe.get_doc('Company', payroll_record.company)
-    country_code = frappe.get_value("Country", company.country, 'code').upper()
-    for salary_slip in salary_slips:
-        # collect address information
-        employee = frappe.get_doc("Employee", salary_slip['employee'])
-        if employee.permanent_address:
-           address = employee.permanent_address
-        elif employee.current_address:
-            address = employee.current_address
-        else:
-            frappe.throw( _("No address for employee {0} found.").format(salary_slip['employee_name']) )
-        lines = address.split("\n")
-        street = get_street_name(lines[0])
-        building = get_building_number(lines[0])
-        pincode = get_pincode(lines[1])
-        city = get_city(lines[1])
-            
-        payments.append({
-            'payment_id': html.escape("PMTINF-{0}".format(salary_slip['name'])),
-            'execution_date': salary_slip['posting_date'],
-            'instruction_id': html.escape("INSTRID-{0}".format(salary_slip['name'])),
-            'endtoend_id': html.escape("{0}".format(salary_slip['name'])),
-            'transaction_type': "SEPA",
-            'amount': salary_slip['rounded_total'],
-            'currency': company.default_currency,
-            'receiver_name': html.escape(salary_slip['employee_name']),
-            'receiver_street': html.escape(street),
-            'receiver_building': html.escape(building),
-            'receiver_city': html.escape(city),
-            'receiver_pincode': html.escape(pincode),
-            'receiver_country': country_code,
-            'receiver_iban': salary_slip['bank_account_no'].replace(" ", "")
-        })
+    frappe.db.sql("SELECT name FROM `tabPayroll Entry` WHERE name=%s FOR UPDATE", (payroll_entry,))
+    payroll = frappe.get_doc("Payroll Entry", payroll_entry)
+    payroll.check_permission("write")
+    if payroll.docstatus != 1:
+        frappe.throw(_("Only a submitted payroll entry can be exported."))
+    rows = _payroll_rows(payroll)
+    return _immutable_payment_export(rows, "Payroll Entry", payroll.name, "payroll", ignore_execution_date=True)
+
+
+def _immutable_payment_export(rows, doctype, name, kind, ignore_execution_date=False):
+    # A later download must keep the bank's duplicate-detection identifiers.
+    identity = [{key: value for key, value in row.items()
+                 if not (ignore_execution_date and key == "execution_date")} for row in rows]
+    fingerprint = sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
+    filename = "payments-" + kind + "-" + fingerprint[:24] + ".xml"
+    originals = frappe.get_all("File", filters={"attached_to_doctype": doctype,
+        "attached_to_name": name, "is_private": 1, "file_name": ["like", "payments-" + kind + "-%.xml"]},
+        fields=["name", "file_name", "file_url"])
+    if originals:
+        matching = next((row for row in originals if row.file_name == filename), None)
+        if not matching:
+            frappe.throw(_("This document already has a payment original with different source data. Review the existing export before preparing a replacement."))
+        from lxml import etree
+        from erpnextswiss.erpnextswiss.swiss_payments import _schema
+        content = frappe.get_doc("File", matching.name).get_content()
+        if isinstance(content, bytes):
+            content = content.decode("utf-8")
+        root = etree.fromstring(content.encode(), etree.XMLParser(resolve_entities=False, no_network=True))
+        _schema().assertValid(root)
+        return dict(content=content, file_name=filename, file_url=matching.file_url, skipped=[], reused=True,
+            message_id=root.findtext(".//{*}MsgId"), count=int(root.findtext(".//{*}GrpHdr/{*}NbOfTxs")),
+            total=root.findtext(".//{*}GrpHdr/{*}CtrlSum"))
     try:
-        paid_from = frappe.get_value('Account', payroll_record.payment_account, 'iban').replace(" ", "")
-    except:
-        frappe.throw("Account IBAN not found: {0}".format(payroll_record.payment_account))
-            
-    pain001_data = {
-        'msg_id': "MSG-" + payroll_record.name,
-        'company': html.escape(payroll_record.company),
-        'payments': payments,
-        'paid_from_iban': paid_from,
-        'paid_from_bic': frappe.get_value('Account', payroll_record.payment_account, 'bic')
-    }
-    return generate_pain001(pain001_data)
-    
-def generate_pain001(pain001_data):
-    # creates a pain.001 payment file from a payroll
-    #try:       
-        # array for skipped payments
-        skipped = []
-        
-        # create xml header
-        content = make_line("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-        # define xml template reference
-        content += make_line("<Document xmlns=\"http://www.six-interbank-clearing.com/de/pain.001.001.03.ch.02.xsd\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.six-interbank-clearing.com/de/pain.001.001.03.ch.02.xsd  pain.001.001.03.ch.02.xsd\">")
-        # transaction holder
-        content += make_line("  <CstmrCdtTrfInitn>")
-        ### Group Header (GrpHdr, A-Level)
-        # create group header
-        content += make_line("    <GrpHdr>")
-        # message ID (unique, SWIFT-characters only)
-        content += make_line("      <MsgId>{0}</MsgId>".format(pain001_data['msg_id']))
-        # creation date and time ( e.g. 2010-02-15T07:30:00 )
-        content += make_line("      <CreDtTm>{0}</CreDtTm>".format(time.strftime("%Y-%m-%dT%H:%M:%S")))
-        # number of transactions in the file
-        transaction_count = 0
-        transaction_count_identifier = "<!-- $COUNT -->"
-        content += make_line("      <NbOfTxs>{0}</NbOfTxs>".format(transaction_count_identifier))
-        # total amount of all transactions ( e.g. 15850.00 )  (sum of all amounts)
-        control_sum = 0.0
-        control_sum_identifier = "<!-- $CONTROL_SUM -->"
-        content += make_line("      <CtrlSum>{0}</CtrlSum>".format(control_sum_identifier))
-        # initiating party requires at least name or identification
-        content += make_line("      <InitgPty>")
-        # initiating party name ( e.g. MUSTER AG )
-        content += make_line("        <Nm>{0}</Nm>".format(pain001_data['company']))
-        content += make_line("      </InitgPty>")
-        content += make_line("    </GrpHdr>")
-        
-        ### Payment Information (PmtInf, B-Level)
-        # payment information records (1 .. 99'999)
-        for payment in pain001_data['payments']:
-            # create temporary code block to compile the payment record (only add to overall on submit)
-            # use 'continue' to skip a record (in case a validation fails)
-            payment_content = ""
-            # create the payment entries
-            payment_content += make_line("    <PmtInf>")
-            # unique (in this file) identification for the payment ( e.g. PMTINF-01, PMTINF-PE-00005 )
-            payment_content += make_line("      <PmtInfId>{0}</PmtInfId>".format(payment['payment_id']))
-            # payment method (TRF or TRA, no impact in Switzerland)
-            payment_content += make_line("      <PmtMtd>TRF</PmtMtd>")
-            # batch booking (true or false; recommended true)
-            payment_content += make_line("      <BtchBookg>true</BtchBookg>")
-            # Requested Execution Date (e.g. 2010-02-22)
-            payment_content += make_line("      <ReqdExctnDt>{0}</ReqdExctnDt>".format(
-                payment['execution_date']))
-            # debitor (technically ignored, but recommended)   
-            payment_content += make_line("      <Dbtr>")
-            # debitor name
-            payment_content += make_line("        <Nm>{0}</Nm>".format(pain001_data['company']))
-            # postal address (recommendadtion: do not use)
-            #content += make_line("        <PstlAdr>")
-            #content += make_line("          <Ctry>CH</Ctry>")
-            #content += make_line("          <AdrLine>SELDWYLA</AdrLine>")
-            #content += make_line("        </PstlAdr>")
-            payment_content += make_line("      </Dbtr>")
-            # debitor account (sender) - IBAN
-            payment_content += make_line("      <DbtrAcct>")
-            payment_content += make_line("        <Id>")
-            if pain001_data['paid_from_iban']:
-                payment_content += make_line("          <IBAN>{0}</IBAN>".format(
-                    pain001_data['paid_from_iban'].replace(" ", "") ))
-            else:
-                # no paying account IBAN: not valid record, skip
-                content += add_invalid_remark( _("{0}: no account IBAN found ({1})".format(
-                    payment, payment_record.paid_from) ) )
-                skipped.append(payment)
-                continue
-            payment_content += make_line("        </Id>")
-            payment_content += make_line("      </DbtrAcct>")
-            if pain001_data['paid_from_bic']:
-                # debitor agent (sender) - BIC
-                payment_content += make_line("      <DbtrAgt>")
-                payment_content += make_line("        <FinInstnId>")
-                payment_content += make_line("          <BIC>{0}</BIC>".format(pain001_data['paid_from_bic']))
-                payment_content += make_line("        </FinInstnId>")
-                payment_content += make_line("      </DbtrAgt>")
-                
-            ### Credit Transfer Transaction Information (CdtTrfTxInf, C-Level)
-            payment_content += make_line("      <CdtTrfTxInf>")
-            # payment identification
-            payment_content += make_line("        <PmtId>")
-            # instruction identification 
-            payment_content += make_line("          <InstrId>{0}</InstrId>".format(payment['instruction_id']))
-            # end-to-end identification (should be used and unique within B-level; payment entry name)
-            payment_content += make_line("          <EndToEndId>{0}</EndToEndId>".format(payment['endtoend_id']))
-            payment_content += make_line("        </PmtId>")
-            # payment type information
-            payment_content += make_line("        <PmtTpInf>")
-            # service level: only used for SEPA (currently not implemented)
-            if payment['transaction_type'] == "SEPA":
-                payment_content += make_line("          <SvcLvl>")
-                # service level code (e.g. SEPA)
-                payment_content += make_line("            <Cd>SEPA</Cd>")
-                payment_content += make_line("          </SvcLvl>")
-            # local instrument
-            if payment['transaction_type'] == "ESR":
-                payment_content += make_line("          <LclInstrm>")
-                # proprietary (nothing or CH01 for ESR)        
-                payment_content += make_line("            <Prtry>CH01</Prtry>")
-                payment_content += make_line("          </LclInstrm>")        
-            payment_content += make_line("        </PmtTpInf>")
-            # amount 
-            payment_content += make_line("        <Amt>")
-            payment_content += make_line("          <InstdAmt Ccy=\"{0}\">{1:.2f}</InstdAmt>".format(
-                payment['currency'], payment['amount']))
-            payment_content += make_line("        </Amt>")
-            # creditor account
-            # creditor account identification
-            if payment['transaction_type'] == "ESR":
-                # add creditor information
-                payment_content += make_line("        <Cdtr>") 
-                payment_content += make_line("          <Nm>{0}</Nm>".format(payment['receiver_name']))
-                payment_content += make_line("          <PstlAdr>")
-                payment_content += make_line("            <StrtNm>{0}</StrtNm>".format(payment['receiver_street']))
-                payment_content += make_line("            <BldgNb>{0}</BldgNb>".format(payment['receiver_building']))
-                payment_content += make_line("            <PstCd>{0}</PstCd>".format(payment['receiver_pincode']))
-                payment_content += make_line("            <TwnNm>{0}</TwnNm>".format(payment['receiver_city']))
-                payment_content += make_line("            <Ctry>{0}</Ctry>".format(payment['receiver_country']))
-                payment_content += make_line("          </PstlAdr>")
-                payment_content += make_line("        </Cdtr>") 
-                # ESR payment
-                payment_content += make_line("        <CdtrAcct>")
-                payment_content += make_line("          <Id>")
-                payment_content += make_line("            <Othr>")
-                # ESR participant number
-                if payment['esr_participant_no']:
-                    payment_content += make_line("              <Id>{0}</Id>".format(payment['esr_participant_no']))
-                else:
-                    # no particpiation number: not valid record, skip
-                    content += add_invalid_remark( _("{0}: no ESR participation number found").format(payment['name']) )
-                    skipped.append(payment['name'])
-                    continue
-                payment_content += make_line("            </Othr>")
-                payment_content += make_line("          </Id>")
-                payment_content += make_line("        </CdtrAcct>")
-                # Remittance Information
-                payment_content += make_line("        <RmtInf>")
-                payment_content += make_line("          <Strd>")
-                # Creditor Reference Information
-                payment_content += make_line("            <CdtrRefInf>")
-                # ESR reference 
-                if payment['esr_reference']:
-                    payment_content += make_line("              <Ref>{0}</Ref>".format(payment['esr_reference']))
-                else:
-                    # no ESR reference: not valid record, skip
-                    content += add_invalid_remark( _("{0}: no ESR reference found").format(payment['name']) )
-                    skipped.append(payment['name'])
-                    continue    
-                payment_content += make_line("            </CdtrRefInf>")
-                payment_content += make_line("          </Strd>")
-                payment_content += make_line("        </RmtInf>")
-            else:
-                # IBAN or SEPA payment
-                # add creditor information
-                payment_content += make_line("        <Cdtr>") 
-                payment_content += make_line("          <Nm>{0}</Nm>".format(payment['receiver_name']))
-                payment_content += make_line("          <PstlAdr>")
-                payment_content += make_line("            <StrtNm>{0}</StrtNm>".format(payment['receiver_street']))
-                payment_content += make_line("            <BldgNb>{0}</BldgNb>".format(payment['receiver_building']))
-                payment_content += make_line("            <PstCd>{0}</PstCd>".format(payment['receiver_pincode']))
-                payment_content += make_line("            <TwnNm>{0}</TwnNm>".format(payment['receiver_city']))
-                payment_content += make_line("            <Ctry>{0}</Ctry>".format(payment['receiver_country']))
-                payment_content += make_line("          </PstlAdr>")
-                payment_content += make_line("        </Cdtr>") 
-                # creditor agent (BIC, optional; removed to resolve issue #15)
-                #if payment_record.bic:                
-                #    payment_content += make_line("        <CdtrAgt>")
-                #    payment_content += make_line("          <FinInstnId>")
-                #    payment_content += make_line("            <BIC>" + 
-                #        payment_record.bic + "</BIC>")
-                #    payment_content += make_line("          </FinInstnId>")
-                #    payment_content += make_line("        </CdtrAgt>")    
-                # creditor account
-                payment_content += make_line("        <CdtrAcct>")
-                payment_content += make_line("          <Id>")
-                if payment['receiver_iban']:
-                    payment_content += make_line("            <IBAN>{0}</IBAN>".format( 
-                        payment['receiver_iban'].replace(" ", "") ))
-                else:
-                    # no iban: not valid record, skip
-                    content += add_invalid_remark( _("{0}: no IBAN found").format(payment['name']) )
-                    skipped.append(payment['name'])
-                    continue
-                payment_content += make_line("          </Id>")
-                payment_content += make_line("        </CdtrAcct>")
-                                        
-            # close payment record
-            payment_content += make_line("      </CdtTrfTxInf>")
-            payment_content += make_line("    </PmtInf>")
-            # once the payment is extracted for payment, submit the record
-            transaction_count += 1
-            control_sum += payment['amount']
-            content += payment_content
-        # add footer
-        content += make_line("  </CstmrCdtTrfInitn>")
-        content += make_line("</Document>")
-        # insert control numbers
-        content = content.replace(transaction_count_identifier, "{0}".format(transaction_count))
-        content = content.replace(control_sum_identifier, "{:.2f}".format(control_sum))
-        
-        return { 'content': content, 'skipped': skipped }
-    #except IndexError:
-    #    frappe.msgprint( _("Please select at least one payment."), _("Information") )
-    #    return
-    #except:
-    #    frappe.throw( _("Error while generating xml. Make sure that you made required customisations to the DocTypes.") )
-    #    return
+        result = render_credit_transfers(rows)
+    except ValueError as error:
+        frappe.throw(str(error))
+    return _archive(result, doctype, [name], filename)
+
+
+def generate_swiss_proposal_file(proposal_name):
+    """Use the same current Swiss format for submitted payment proposals."""
+    frappe.db.sql("SELECT name FROM `tabPayment Proposal` WHERE name=%s FOR UPDATE", (proposal_name,))
+    proposal = frappe.get_doc("Payment Proposal", proposal_name)
+    proposal.check_permission("write")
+    if proposal.docstatus != 1:
+        frappe.throw(_("Only a submitted payment proposal can be exported."))
+    debtor = _debtor(proposal.company, proposal.pay_from_account)
+    rows = []
+    for payment in proposal.payments:
+        method = payment.payment_type or "IBAN"
+        iban = normalize_iban(payment.iban)
+        participant = normalize_iban(payment.esr_participation_number)
+        if method == "ESR":
+            if not (is_qr_iban(participant) or is_qr_iban(iban)):
+                frappe.throw(_("Legacy ESR payments must be replaced with current IBAN or QR-IBAN details."))
+            iban, method = participant if is_qr_iban(participant) else iban, "QRR"
+        street, building = _street_parts(payment.receiver_address_line1)
+        rows.append(dict(name=str(payment.name), amount=payment.amount, currency=payment.currency,
+            execution_date=max(getdate(payment.execution_date), getdate(nowdate())).isoformat(),
+            iban=iban, bic=payment.bic, service_level=method, reference=payment.reference,
+            qr_reference=payment.esr_reference, is_salary=bool(payment.is_salary), debtor=debtor,
+            creditor=dict(name=payment.receiver, street=street, building=building,
+                pincode=payment.receiver_pincode, city=payment.receiver_city,
+                country_code=_country_code(payment.receiver_country))))
+    return _immutable_payment_export(rows, "Payment Proposal", proposal.name, "proposal", ignore_execution_date=True)
