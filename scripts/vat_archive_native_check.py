@@ -88,7 +88,7 @@ def main():
         new.payable_tax = 9999
         check(new.create_transfer_file()['sha256'] == a['sha256'] and float(new.payable_tax) == 71, 'document API reloads authoritative submitted amounts')
         rejects(lambda: new_declaration().insert(), 'duplicate original period blocked')
-        correction = frappe.copy_doc(new); correction.title = 'VAT isolated explicit correction'; correction.submission_type = '2'; correction.corrects_declaration = new.name
+        correction = frappe.copy_doc(new, ignore_no_copy=False); correction.title = 'VAT isolated explicit correction'; correction.submission_type = '2'; correction.corrects_declaration = new.name
         correction.insert(); correction.submit()
         check(correction.xml_sha256 != new.xml_sha256, 'explicit correction retains original and has its own XML')
         frappe.set_user('Guest')
