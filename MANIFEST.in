@@ -22,3 +22,5 @@ recursive-include erpnextswiss *.sql
 recursive-include erpnextswiss *.xlsx
 recursive-include erpnextswiss *.sh
 recursive-exclude erpnextswiss *.pyc
+
+recursive-include erpnextswiss/resources *.xsd *.json *.md

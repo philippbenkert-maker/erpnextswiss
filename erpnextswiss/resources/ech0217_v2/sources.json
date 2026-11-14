@@ -1,0 +1,42 @@
+{
+  "eCH-0217-2-0-0.xsd": {
+    "url": "https://ech.ch/sites/default/files/imce/eCH-Dossier/0211-0240/eCH-0217/2.0.0/Beilagen/eCH-0217-2-0-0.xsd",
+    "sha256": "2a8ecb5b7954733129f7334a8ac2c18c4e3abbd6f34092f3d2136f55ff55abfa"
+  },
+  "eCH-0108-7-0.xsd": {
+    "url": "https://www.ech.ch/xmlns/eCH-0108/7/eCH-0108-7-0.xsd",
+    "sha256": "cc510fb1975ed622705dff247fa9ce57a97c465ea67f2c97e9f28b32ca33e9f1"
+  },
+  "eCH-0058-5-0.xsd": {
+    "url": "https://www.ech.ch/xmlns/eCH-0058/5/eCH-0058-5-0.xsd",
+    "sha256": "ac931684ba986195ff938aa336b3ae75619692badbb7ab18ecedbc4441b307a0"
+  },
+  "eCH-0044-4-1.xsd": {
+    "url": "https://www.ech.ch/xmlns/eCH-0044/4/eCH-0044-4-1.xsd",
+    "sha256": "5ea60e34d2c6f519e493cb0285beccdda7a5b6324b7297354b3ebb27559009a0"
+  },
+  "eCH-0007-6-0.xsd": {
+    "url": "https://www.ech.ch/xmlns/eCH-0007/6/eCH-0007-6-0.xsd",
+    "sha256": "53b9da9ff1657f907328e224cdf2c9198532407d15683654f0aeb7721bdc8ac8"
+  },
+  "eCH-0008-3-0.xsd": {
+    "url": "https://www.ech.ch/xmlns/eCH-0008/3/eCH-0008-3-0.xsd",
+    "sha256": "4df5de7a894690f2406e23dc7ee163f9da59dad858a5d657cce7db6a8d87f46f"
+  },
+  "eCH-0010-8-0.xsd": {
+    "url": "https://www.ech.ch/xmlns/eCH-0010/8/eCH-0010-8-0.xsd",
+    "sha256": "c7f3b80e82ebb28a0d82cb00c3c8f8aeaaeaa5101bcc33df460b549a56b2297c"
+  },
+  "eCH-0129-6-0.xsd": {
+    "url": "https://www.ech.ch/xmlns/eCH-0129/6/eCH-0129-6-0.xsd",
+    "sha256": "8bc95262ad0cd1ab41c0af4ab5b98c08702818f65b493998eae0778a1bd2ce9d"
+  },
+  "eCH-0010-6-0.xsd": {
+    "url": "https://www.ech.ch/xmlns/eCH-0010/6/eCH-0010-6-0.xsd",
+    "sha256": "842875fdc46fe00b2798b94ff55a5d6b67ea993e5e414b607cba69f5f0316fd8"
+  },
+  "eCH-0097-2-0.xsd": {
+    "url": "https://www.ech.ch/xmlns/eCH-0097/2/eCH-0097-2-0.xsd",
+    "sha256": "7fb384a7bfb496991746cf0899038fdc8d5f1b849d6a19262e21bc92ce030916"
+  }
+}

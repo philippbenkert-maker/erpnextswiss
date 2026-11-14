@@ -1,282 +1,95 @@
-// Copyright (c) 2018-2023, libracore (https://www.libracore.com) and contributors
-// For license information, please see license.txt
-
-frappe.ui.form.on('VAT Declaration', {
-    'refresh': function(frm) {
+// Swiss VAT workflow. Server calculation and XML archive are authoritative.
+const VAT_API = "erpnextswiss.erpnextswiss.doctype.vat_declaration.vat_declaration.";
+frappe.ui.form.on("VAT Declaration", {
+    onload(frm) {
+        if (!frm.is_new()) return;
+        const today = frappe.datetime.get_today().split("-").map(Number);
+        const end = new Date(Date.UTC(today[0], Math.floor((today[1] - 1) / 3) * 3, 0));
+        const start = new Date(Date.UTC(end.getUTCFullYear(), Math.floor(end.getUTCMonth() / 3) * 3, 1));
+        if (!frm.doc.start_date) frm.set_value("start_date", start.toISOString().slice(0, 10));
+        if (!frm.doc.end_date) frm.set_value("end_date", end.toISOString().slice(0, 10));
+        if (!frm.doc.company) frm.set_value("company", frappe.defaults.get_user_default("Company"));
+    },
+    refresh(frm) {
         if (frm.doc.docstatus === 0) {
-            frm.add_custom_button(__("Get values"), function() 
-            {
-                get_values(frm);
-            });
-            frm.add_custom_button(__("Recalculate"), function() 
-            {
-                recalculate(frm);
-            });
-            
-            recalculate(frm);
-        }
-        else if (frm.doc.docstatus === 1) {
-            frm.add_custom_button(__("Download Transfer File"), function() 
-            {
-                download_transfer_file(frm);
-            }).addClass("btn-primary");
-        }
-    },
-    'before_save': function(frm) {
-        recalculate(frm);
-    },
-    'onload': function(frm) {
-        if (frm.doc.__islocal) {
-            // this function is called when a new VAT declaration is created
-            // get current month (0..11)
-            var d = new Date();
-            var n = d.getMonth();
-            // define title as Qn YYYY of the last complete quarter
-            var title = " / " + d.getFullYear();
-            if ((n > (-1)) && (n < 3)) {
-                title = "Q4 / " + (d.getFullYear() - 1);
-                frm.set_value('start_date', (d.getFullYear() - 1) + "-10-01");
-                frm.set_value('end_date', (d.getFullYear() - 1) + "-12-31");
-            } else if ((n > (2)) && (n < 6)) {
-                title = "Q1" + title;
-                frm.set_value('start_date', d.getFullYear() + "-01-01");
-                frm.set_value('end_date', d.getFullYear() + "-03-31");
-            } else if ((n > (5)) && (n < 9)) {
-                title = "Q2" + title;
-                frm.set_value('start_date', d.getFullYear() + "-04-01");
-                frm.set_value('end_date', d.getFullYear() + "-06-30");
-            } else {
-                title = "Q3" + title;
-                frm.set_value('start_date', d.getFullYear() + "-07-01");
-                frm.set_value('end_date', d.getFullYear() + "-09-30");
-            } 
-
-            cur_frm.set_value('title', title + " - " + (frm.doc.cmp_abbr || ""));
-        }
-    },
-    'company': function(frm) {
-        if ((frm.doc.__islocal) && (frm.doc.company)) {
-            // replace company key
-            var parts = frm.doc.title.split(" - ");
-            if (parts.length > 1) {
-                var new_title = [];
-                for (var i = 0; i < (parts.length - 1); i++) {
-                    new_title.push(parts[i]);
+            frm.set_intro(__("Check period, accounting amounts and reporting basis. Submit validates and archives the Swiss XML; it does not post or file anything."), "blue");
+            frm.add_custom_button(__("Get values"), () => vat_get_values(frm));
+            frm.add_custom_button(__("Recalculate"), () => vat_calculate(frm));
+        } else if (frm.doc.docstatus === 1) {
+            const filed = frm.doc.filing_status === "Filed (user confirmed)";
+            frm.set_intro(filed ? __("External filing confirmed. Original XML and closing entry are preserved. Downloading does not file again.") : __("XML archived. Upload this file to the ESTV portal and then record the external filing here."), filed ? "green" : "blue");
+            if (frappe.perm.has_perm("VAT Declaration", 0, "write")) {
+                frm.add_custom_button(__("Download original XML"), async () => {
+                    const r = await frm.call({method: "create_transfer_file", freeze: true});
+                    if (!r.message) return;
+                    const url = URL.createObjectURL(new Blob([r.message.content], {type: "application/xml;charset=utf-8"}));
+                    const link = document.createElement("a");
+                    link.href = url; link.download = r.message.filename; link.click();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    await frm.reload_doc();
+                });
+                if (!filed && frappe.perm.has_perm("VAT Declaration", 0, "submit")) {
+                    frm.add_custom_button(__("Record external filing"), () => vat_confirm_filing(frm));
                 }
-                new_title.push(frm.doc.cmp_abbr);
-                cur_frm.set_value("title", new_title.join(" - "));
-            } else if (parts.length === 0) {
-                // key missing
-                cur_frm.set_value("title", frm.doc.title + " - " + frm.doc.cmp_abbr);
             }
-            
         }
     },
-    // add change handlers for tax positions
-    'normal_amount_2024': function(frm) { update_tax_amounts(frm) },
-    'reduced_amount_2024': function(frm) { update_tax_amounts(frm) },
-    'lodging_amount_2024': function(frm) { update_tax_amounts(frm) },
-    'additional_amount_2024': function(frm) { update_tax_amounts(frm) },
-    'amount_1_2024': function(frm) { update_tax_amounts(frm) },
-    'amount_2_2024': function(frm) { update_tax_amounts(frm) },
-    'rate_1_2024': function(frm) { update_tax_amounts(frm) },
-    'rate_2_2024': function(frm) { update_tax_amounts(frm) },
-    'normal_rate_2024': function(frm) { update_tax_amounts(frm) },
-    'reduced_rate_2024': function(frm) { update_tax_amounts(frm) },
-    'lodging_rate_2024': function(frm) { update_tax_amounts(frm) },
-    'additional_tax_2024': function(frm) { update_tax_amounts(frm) },
-    'normal_amount': function(frm) { update_tax_amounts(frm) },
-    'reduced_amount': function(frm) { update_tax_amounts(frm) },
-    'lodging_amount': function(frm) { update_tax_amounts(frm) },
-    'additional_amount': function(frm) { update_tax_amounts(frm) },
-    'amount_1': function(frm) { update_tax_amounts(frm) },
-    'amount_2': function(frm) { update_tax_amounts(frm) },
-    'rate_1': function(frm) { update_tax_amounts(frm) },
-    'rate_2': function(frm) { update_tax_amounts(frm) },
-    'normal_rate': function(frm) { update_tax_amounts(frm) },
-    'reduced_rate': function(frm) { update_tax_amounts(frm) },
-    'lodging_rate': function(frm) { update_tax_amounts(frm) },
-    'additional_tax': function(frm) { update_tax_amounts(frm) },
-    // add change handlers for deduction positions
-    'tax_free_services': function(frm) { update_taxable_revenue(frm) },
-    'revenue_abroad': function(frm) { update_taxable_revenue(frm) },
-    'transfers': function(frm) { update_taxable_revenue(frm) },
-    'non-taxable_services': function(frm) { update_taxable_revenue(frm) },
-    'losses': function(frm) { update_taxable_revenue(frm) },
-    'misc': function(frm) { update_taxable_revenue(frm) },
-
-    // add change handlers for pretax
-    'pretax_material': function(frm) { update_payable_tax(frm) },
-    'pretax_investments': function(frm) { update_payable_tax(frm) },
-    'missing_pretax': function(frm) { update_payable_tax(frm) },
-    'pretax_correction_mixed': function(frm) { update_payable_tax(frm) },
-    'pretax_correction_other': function(frm) { update_payable_tax(frm) }
+    company: vat_title,
+    start_date: vat_title,
+    end_date: vat_title,
 });
 
-// retrieve values from database
-function get_values(frm) {
-    // Total revenue
-    get_total(frm, "viewVAT_200", 'total_revenue');
-    // get_total(frm, "viewVAT_205", 'non_taxable_revenue');
-    // Deductions
-    get_total(frm, "viewVAT_220", 'tax_free_services');
-    get_total(frm, "viewVAT_221", 'revenue_abroad');
-    get_total(frm, "viewVAT_225", 'transfers');
-    get_total(frm, "viewVAT_230", 'non_taxable_services');
-    get_total(frm, "viewVAT_235", 'losses');
-    // Tax calculation
-    if (frm.doc.vat_type == "effective") {
-        get_total(frm, "viewVAT_303", 'normal_amount_2024');
-        get_total(frm, "viewVAT_313", 'reduced_amount_2024');
-        get_total(frm, "viewVAT_343", 'lodging_amount_2024');
-        get_total(frm, "viewVAT_302", 'normal_amount');
-        get_total(frm, "viewVAT_312", 'reduced_amount');
-        get_total(frm, "viewVAT_342", 'lodging_amount');
-    }
-    else {
-        get_total(frm, "viewVAT_323", 'amount_1_2024');
-        get_total(frm, "viewVAT_333", 'amount_2_2024');
-        get_total(frm, "viewVAT_322", 'amount_1');
-        get_total(frm, "viewVAT_332", 'amount_2');
-    }
-    get_total(frm, "viewVAT_383", 'additional_amount_2024');
-    get_tax(frm, "viewVAT_383", 'additional_tax_2024');
-    get_total(frm, "viewVAT_382", 'additional_amount');
-    get_tax(frm, "viewVAT_382", 'additional_tax');
-    // Pretaxes
-    if (frm.doc.vat_type == "effective") {
-        get_tax(frm, "viewVAT_400", 'pretax_material');
-        get_tax(frm, "viewVAT_405", 'pretax_investments');
+function vat_title(frm) {
+    if (!frm.is_new() || !frm.doc.end_date || !frm.doc.company) return;
+    const end = frm.doc.end_date.split("-").map(Number);
+    const title = `MWST ${end[0]} Q${Math.ceil(end[1] / 3)} - ${frm.doc.company}`;
+    if (!frm.doc.title || frm.doc.title === frm._vat_auto_title) {
+        frm._vat_auto_title = title;
+        frm.set_value("title", title);
     }
 }
 
-// force recalculate
-function recalculate(frm) {
-    update_taxable_revenue(frm);
-    update_tax_amounts(frm);
-    update_payable_tax(frm);
+async function vat_calculate(frm) {
+    if (frm.doc.docstatus !== 0) return;
+    const snapshot = JSON.stringify(frm.doc);
+    const r = await frappe.call({method: VAT_API + "calculate_values", args: {values: snapshot}});
+    // An older response must never overwrite a newer edit.
+    if (JSON.stringify(frm.doc) === snapshot && r.message) await frm.set_value(r.message);
 }
 
-
-function update_tax_amounts(frm) {
-    // effective tax: tax rate on net amount
-    var normal_tax_2024 = frm.doc.normal_amount_2024 * (frm.doc.normal_rate_2024 / 100);
-    var reduced_tax_2024 = frm.doc.reduced_amount_2024 * (frm.doc.reduced_rate_2024 / 100);
-    var lodging_tax_2024 = frm.doc.lodging_amount_2024 * (frm.doc.lodging_rate_2024 / 100);
-    var normal_tax = frm.doc.normal_amount * (frm.doc.normal_rate / 100);
-    var reduced_tax = frm.doc.reduced_amount * (frm.doc.reduced_rate / 100);
-    var lodging_tax = frm.doc.lodging_amount * (frm.doc.lodging_rate / 100);
-    // saldo tax: rate on gross amount
-    var tax_1_2024 = frm.doc.amount_1_2024  * (frm.doc.rate_1_2024 / 100);
-    var tax_2_2024 = frm.doc.amount_2_2024 * (frm.doc.rate_2_2024 / 100);
-    var tax_1 = frm.doc.amount_1  * (frm.doc.rate_1 / 100);
-    var tax_2 = frm.doc.amount_2 * (frm.doc.rate_2 / 100);
-    var total_tax = normal_tax_2024 + reduced_tax_2024 + lodging_tax_2024 
-        + tax_1_2024 + tax_2_2024 + frm.doc.additional_tax_2024 
-        + normal_tax + reduced_tax + lodging_tax + tax_1 + tax_2 + frm.doc.additional_tax;
-    // set values
-    frm.set_value('normal_tax_2024', normal_tax_2024);
-    frm.set_value('reduced_tax_2024', reduced_tax_2024);
-    frm.set_value('lodging_tax_2024', lodging_tax_2024);
-    frm.set_value('tax_1_2024', tax_1_2024);
-    frm.set_value('tax_2_2024', tax_2_2024);
-    frm.set_value('normal_tax', normal_tax);
-    frm.set_value('reduced_tax', reduced_tax);
-    frm.set_value('lodging_tax', lodging_tax);
-    frm.set_value('tax_1', tax_1);
-    frm.set_value('tax_2', tax_2);
-    frm.set_value('total_tax', total_tax);
+async function vat_get_values(frm) {
+    if (!frm.doc.company || !frm.doc.start_date || !frm.doc.end_date) {
+        frappe.msgprint(__("Select company and period first.")); return;
+    }
+    const snapshot = JSON.stringify(frm.doc);
+    const r = await frappe.call({method: VAT_API + "get_period_values", freeze: true,
+        freeze_message: __("Retrieving accounting amounts…"),
+        args: {company: frm.doc.company, start_date: frm.doc.start_date, end_date: frm.doc.end_date, vat_type: frm.doc.vat_type}});
+    if (r.message && JSON.stringify(frm.doc) === snapshot) { await frm.set_value(r.message); await vat_calculate(frm); }
 }
 
-function update_taxable_revenue(frm) {
-    var deductions =  frm.doc.tax_free_services +
-        frm.doc.revenue_abroad +
-        frm.doc.transfers + 
-        frm.doc.non_taxable_services + 
-        frm.doc.losses +
-        frm.doc.misc;
-    var taxable = frm.doc.total_revenue - frm.doc.non_taxable_revenue - deductions;
-    frm.set_value('total_deductions', deductions);
-    frm.set_value('taxable_revenue', taxable);
+function vat_confirm_filing(frm) {
+    const dialog = new frappe.ui.Dialog({title: __("Record external filing"), fields: [
+        {fieldtype: "HTML", options: `<p>${__("This records an upload already completed in the ESTV portal. No data is sent to the ESTV.")}</p>`},
+        {fieldname: "evidence", fieldtype: "Small Text", label: __("Basis of filing confirmation"), reqd: 1},
+        {fieldname: "filed_on", fieldtype: "Date", label: __("Actual external filing date"), description: __("Blank if the actual upload date is unknown.")},
+    ], primary_action_label: __("Confirm completed filing"), primary_action: async (values) => {
+        await frm.call({method: "confirm_external_filing", args: values, freeze: true});
+        dialog.hide(); await frm.reload_doc();
+    }});
+    dialog.show();
 }
 
-/* view: view to use
- * target: target field
- */
-function get_total(frm, view, target) {
-    // total revenues is the sum of all base grand totals in the period
-    frappe.call({
-        method: 'erpnextswiss.erpnextswiss.doctype.vat_declaration.vat_declaration.get_view_total',
-        args: { 
-            start_date: frm.doc.start_date,
-            end_date: frm.doc.end_date,
-            view_name: view,
-            company: frm.doc.company
-        },
-        callback: function(r) {
-            if (r.message) {
-                frm.set_value(target, r.message.total);
-            }
-        }
-    }); 
+// Keep the displayed calculation responsive without floating-point tax arithmetic in the browser.
+const vat_inputs = ["total_revenue", "non_taxable_revenue", "tax_free_services", "revenue_abroad", "transfers", "non_taxable_services", "losses", "misc", "pretax_material", "pretax_investments", "missing_pretax", "pretax_correction_mixed", "pretax_correction_other", "form_1050", "form_1055", "vat_type"];
+for (const suffix of ["_2024", ""]) {
+    vat_inputs.push("additional_amount" + suffix);
+    for (const prefix of ["normal", "reduced", "lodging"]) vat_inputs.push(prefix + "_amount" + suffix, prefix + "_rate" + suffix);
+    for (const n of ["1", "2"]) vat_inputs.push("amount_" + n + suffix, "rate_" + n + suffix);
 }
-
-/* view: view to use
- * target: target field
- */
-function get_tax(frm, view, target) {
-    // total tax is the sum of all taxes in the period
-    frappe.call({
-        method: 'erpnextswiss.erpnextswiss.doctype.vat_declaration.vat_declaration.get_view_tax',
-        args: { 
-            start_date: frm.doc.start_date,
-            end_date: frm.doc.end_date,
-            view_name: view,
-            company: frm.doc.company
-        },
-        callback: function(r) {
-            if (r.message) {
-                frm.set_value(target, r.message.total);
-            }
-        }
-    }); 
-}
-        
-function update_payable_tax(frm) {
-    var pretax = frm.doc.pretax_material 
-        + frm.doc.pretax_investments 
-        + frm.doc.missing_pretax 
-        - frm.doc.pretax_correction_mixed
-        - frm.doc.pretax_correction_other
-        + frm.doc.form_1050
-        + frm.doc.form_1055;
-    frm.set_value('total_pretax_reductions', pretax);
-    var payable_tax = frm.doc.total_tax - pretax;
-    frm.set_value('payable_tax', payable_tax);
-}
-
-function download_transfer_file(frm) {
-    frappe.call({
-        'method': 'create_transfer_file',
-        'doc': frm.doc,
-        'callback': function(r) {
-            if (r.message) {
-                // prepare the xml file for download
-                download("estv.xml", r.message.content);
-            } 
-        }
-     });   
-}
-
-function download(filename, content) {
-    var element = document.createElement('a');
-    element.setAttribute('href', 'data:application/octet-stream;charset=utf-8,' + encodeURIComponent(content));
-    element.setAttribute('download', filename);
-
-    element.style.display = 'none';
-    document.body.appendChild(element);
-
-    element.click();
-
-    document.body.removeChild(element);
-}
+const vat_handlers = {};
+for (const field of vat_inputs) vat_handlers[field] = frm => {
+    clearTimeout(frm._vat_calc_timer);
+    frm._vat_calc_timer = setTimeout(() => vat_calculate(frm), 250);
+};
+frappe.ui.form.on("VAT Declaration", vat_handlers);
