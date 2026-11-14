@@ -258,7 +258,7 @@ def _read_bank_payload(payload, account):
     transactions = []
     references = set()
     for statement in preview["statements"]:
-        if statement["balance_check"] in ("mismatch", "requires_page_assembly"):
+        if statement["balance_check"] in ("mismatch", "ambiguous", "requires_page_assembly"):
             raise BankFileError("Statement balances or page completeness require review")
         for entry in statement["entries"]:
             if entry["issues"]:

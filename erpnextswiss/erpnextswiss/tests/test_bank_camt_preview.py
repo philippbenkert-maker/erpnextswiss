@@ -165,3 +165,6 @@ class TestBankCamtPreview(unittest.TestCase):
         self.assertEqual(preview._balance_check(statement), 'matched')
         statement['message_page'] = '2'
         self.assertEqual(preview._balance_check(statement), 'requires_page_assembly')
+        statement['message_page'] = None
+        statement['balances'].append(deepcopy(statement['balances'][0]))
+        self.assertEqual(preview._balance_check(statement), 'ambiguous')

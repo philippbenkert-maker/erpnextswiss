@@ -158,6 +158,8 @@ def _balance_check(statement):
         return 'requires_page_assembly'
     opening = [b for b in statement['balances'] if b['type'] == 'OPBD']
     closing = [b for b in statement['balances'] if b['type'] == 'CLBD']
+    if len(opening) > 1 or len(closing) > 1:
+        return 'ambiguous'
     if len(opening) != 1 or len(closing) != 1:
         return 'not_available'
     movement = sum(_signed(e) for e in statement['entries'] if e['status'] == 'BOOK')
@@ -203,7 +205,7 @@ def preview_camt_archive(payload, profile=None, *, company, accounts):
         statement['balance_check'] = _balance_check(statement)
         for entry in statement['entries']:
             entry.update(issues=_entry_issues(entry, settings), candidates=[])
-            if statement['balance_check'] == 'mismatch':
+            if statement['balance_check'] in ('mismatch', 'ambiguous'):
                 entry['issues'].append('statement_balance_mismatch')
             elif statement['balance_check'] == 'requires_page_assembly':
                 entry['issues'].append('statement_requires_page_assembly')
