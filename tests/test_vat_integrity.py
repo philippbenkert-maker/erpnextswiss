@@ -59,3 +59,11 @@ class VATIntegrityTests(unittest.TestCase):
         self.changes[0]['changes'][0]['from_currency'] = 'EUR'
         with self.assertRaises(AssertionError):
             verify_template_changes(self.before, self.after, self.changes)
+    def test_noop_setup_requires_exact_unchanged_templates(self):
+        self.assertEqual(verify_template_changes(self.after, copy.deepcopy(self.after), []), [])
+
+    def test_noop_setup_rejects_even_save_timestamp_changes(self):
+        changed = copy.deepcopy(self.after)
+        changed['headers']['Swiss']['modified'] = 'unexpected save'
+        with self.assertRaises(AssertionError):
+            verify_template_changes(self.after, changed, [])

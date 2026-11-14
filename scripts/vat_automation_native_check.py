@@ -59,8 +59,13 @@ def main():
         setup = configure_company(company, apply=True)
         check(setup['applied'], 'reviewed company mapping configured')
         check(setup['future_template_changes'] == preview['future_template_changes'], 'applied template changes exactly match reviewed preview')
-        template_evidence = verify_template_changes(templates_before, template_snapshot(), preview['future_template_changes'])
-        check(bool(template_evidence), 'only reviewed future template fields and save timestamps changed')
+        templates_after = template_snapshot()
+        template_evidence = verify_template_changes(templates_before, templates_after, preview['future_template_changes'])
+        if preview['future_template_changes']:
+            check(bool(template_evidence), 'only reviewed future template fields and save timestamps changed')
+        else:
+            check(not template_evidence and templates_after == templates_before,
+                  'already configured future templates remain byte-for-byte unchanged')
         print('TEMPLATE_CHANGE_EVIDENCE ' + json.dumps(template_evidence, default=str), flush=True)
         check(accounting_digest() == before, 'setup leaves all existing accounting rows unchanged')
         second = configure_company(company, apply=True)
