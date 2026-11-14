@@ -97,3 +97,5 @@ row, including all posted invoice taxes. Separate whole-table snapshots protect
 all purchase tax templates: only the account/tax-code changes from the exact
 reviewed preview plus their Frappe save timestamps may change. Added/deleted rows,
 rate changes or changes to any other template fail acceptance.
+
+Die Einrichtung weist auch die Kontowährung jeder betroffenen zukünftigen Steuervorlagenzeile ausdrücklich im Vorher-/Nachher-Vergleich aus. Der Integritätsnachweis akzeptiert nur die geprüften Konten-, Währungs- und Ziffernänderungen sowie die Speichermetadaten dieser Vorlagen; sämtliche vorhandenen Rechnungs- und Buchungszeilen bleiben unverändert.

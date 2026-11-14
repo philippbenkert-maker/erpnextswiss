@@ -62,6 +62,18 @@ def configure_company(company, apply=False):
                         changed.append({'from_code': doc.get('tax_code'), 'to_code': code})
                         doc.tax_code = code
             if changed:
+                # ERPNext validates account currencies when saving a template.
+                # Include every such normalization in the exact reviewed preview.
+                for tax in doc.taxes:
+                    currency = frappe.db.get_value('Account', tax.account_head, 'account_currency')
+                    row_change = next((r for r in changed if r.get('row') == tax.name), None)
+                    if row_change is not None or tax.get('account_currency') != currency:
+                        if row_change is None:
+                            row_change = {'row': tax.name, 'from_account': tax.account_head,
+                                'to_account': tax.account_head}
+                            changed.append(row_change)
+                        row_change.update(from_currency=tax.get('account_currency'), to_currency=currency)
+                        tax.account_currency = currency
                 template_changes.append({'doctype': doctype, 'name': name, 'changes': changed})
                 if apply:
                     doc.save()

@@ -50,7 +50,9 @@ def verify_template_changes(before, after, reviewed_changes):
                 row = change['row']
                 assert before['taxes'][row]['parent'] == name
                 assert before['taxes'][row]['account_head'] == change['from_account']
-                expected_taxes[row] = {'account_head': change['to_account']}
+                assert before['taxes'][row].get('account_currency') == change['from_currency']
+                expected_taxes[row] = {'account_head': change['to_account'],
+                    'account_currency': change['to_currency']}
             else:
                 assert before['headers'][name]['tax_code'] == change['from_code']
                 expected_headers[name]['tax_code'] = change['to_code']
