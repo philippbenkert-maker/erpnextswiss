@@ -222,10 +222,19 @@ class AdapterTests(unittest.TestCase):
         self.frappe.get_all.side_effect=lambda *a,**k: [NS(**saved)] if saved else []
         self.frappe.get_doc.side_effect=lambda kind,name:payroll if kind=='Payroll Entry' else NS(get_content=lambda:saved['content'])
         first=self.ns['generate_payment_file_from_payroll']('PAYROLL-ONE')
+        # Real Frappe storage adds this hash suffix if an orphan from a rolled
+        # back transaction already occupies the filename. Keep the bank original.
+        saved['content_hash']='0'*26+'a1b2c3'
+        saved['file_name']=saved['file_name'][:-4]+'a1b2c3.xml'
         self.ns['_payroll_rows']=lambda p:[row(is_salary=True,execution_date='2026-11-17')]
         second=self.ns['generate_payment_file_from_payroll']('PAYROLL-ONE')
         self.assertTrue(second['reused']);self.assertEqual(first['content'],second['content'])
         self.assertEqual(first['message_id'],second['message_id'])
+        self.assertEqual(second['file_name'],saved['file_name'])
+        saved['content_hash']='0'*26+'ffffff'
+        with self.assertRaisesRegex(ValueError,'different source data'):
+            self.ns['generate_payment_file_from_payroll']('PAYROLL-ONE')
+        saved['content_hash']='0'*26+'a1b2c3'
         self.ns['_payroll_rows']=lambda p:[row(is_salary=True,amount='999')]
         with self.assertRaisesRegex(ValueError,'different source data'):self.ns['generate_payment_file_from_payroll']('PAYROLL-ONE')
 

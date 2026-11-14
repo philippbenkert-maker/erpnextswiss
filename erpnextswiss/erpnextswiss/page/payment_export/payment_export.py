@@ -253,9 +253,16 @@ def _immutable_payment_export(rows, doctype, name, kind, ignore_execution_date=F
     filename = "payments-" + kind + "-" + fingerprint[:24] + ".xml"
     originals = frappe.get_all("File", filters={"attached_to_doctype": doctype,
         "attached_to_name": name, "is_private": 1, "file_name": ["like", "payments-" + kind + "-%.xml"]},
-        fields=["name", "file_name", "file_url"])
+        fields=["name", "file_name", "file_url", "content_hash"])
     if originals:
-        matching = next((row for row in originals if row.file_name == filename), None)
+        # Frappe appends six content-hash characters when a storage filename
+        # already exists, including after an earlier transaction was rolled back.
+        # Accept only that exact, hash-bound suffix; never a loose prefix match.
+        def matches(original):
+            digest = getattr(original, "content_hash", None) or ""
+            suffixed = filename[:-4] + digest[-6:] + ".xml"
+            return original.file_name == filename or (len(digest) >= 6 and original.file_name == suffixed)
+        matching = next((row for row in originals if matches(row)), None)
         if not matching:
             frappe.throw(_("This document already has a payment original with different source data. Review the existing export before preparing a replacement."))
         from lxml import etree
@@ -265,7 +272,7 @@ def _immutable_payment_export(rows, doctype, name, kind, ignore_execution_date=F
             content = content.decode("utf-8")
         root = etree.fromstring(content.encode(), etree.XMLParser(resolve_entities=False, no_network=True))
         _schema().assertValid(root)
-        return dict(content=content, file_name=filename, file_url=matching.file_url, skipped=[], reused=True,
+        return dict(content=content, file_name=matching.file_name, file_url=matching.file_url, skipped=[], reused=True,
             message_id=root.findtext(".//{*}MsgId"), count=int(root.findtext(".//{*}GrpHdr/{*}NbOfTxs")),
             total=root.findtext(".//{*}GrpHdr/{*}CtrlSum"))
     try:
