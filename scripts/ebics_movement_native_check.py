@@ -117,6 +117,9 @@ def concurrent_checks():
         doc.insert(ignore_permissions=True).submit()
         frappe.db.commit()
         frappe.db.sql("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        # Frappe commit() already began a transaction under the old isolation.
+        # Restart it so SET SESSION actually governs this stale-snapshot test.
+        frappe.db.rollback()
         plan = auto._movement_plan(connection, statement, entry)
         assert plan["state"] == "adopt"
         with ThreadPoolExecutor(max_workers=1) as pool:
