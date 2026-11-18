@@ -801,7 +801,7 @@ class TestEbicsAutomation(TestCase):
         statement, entry = self._movement_entry()
         bank_account = frappe._dict(name='Firmenkonto EUR', company=connection.company)
         with patch.object(automation.frappe.db, 'get_values', side_effect=[
-                [bank_account], [], [], [], [bank_account], [], [], []]):
+                [bank_account], [], [], [], [], [], [bank_account], [], [], [], [], []]):
             first = automation._movement_plan(connection, statement, entry)
             second = automation._movement_plan(connection, statement, dict(entry))
         self.assertEqual(first['state'], 'create')
@@ -826,11 +826,11 @@ class TestEbicsAutomation(TestCase):
             company=connection.company, bank_account=bank_account.name, currency='EUR', deposit=0, withdrawal=100,
             transaction_id='BANK-REF-1', reference_number=None,
             custom_ebics_movement_id=None, custom_ebics_movement_fingerprint=None)
-        with patch.object(automation.frappe.db, 'get_values', side_effect=[[bank_account], [], [], [legacy]]):
+        with patch.object(automation.frappe.db, 'get_values', side_effect=[[bank_account], [], [], [], [], [legacy]]):
             self.assertEqual(automation._movement_plan(connection, statement, entry)['state'], 'adopt')
 
         legacy.transaction_id = 'ANOTHER-REAL-MOVEMENT'
-        with patch.object(automation.frappe.db, 'get_values', side_effect=[[bank_account], [], [], [legacy]]):
+        with patch.object(automation.frappe.db, 'get_values', side_effect=[[bank_account], [], [], [], [], [legacy]]):
             result = automation._movement_plan(connection, statement, entry)
         self.assertEqual(result['state'], 'review')
         self.assertEqual(result['reason'], 'legacy_bank_transaction_conflict')

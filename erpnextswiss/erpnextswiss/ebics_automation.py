@@ -516,6 +516,17 @@ def _movement_plan(connection, statement, entry, *, current=False):
                 "state": "existing", "bank_transaction": row["name"],
                 "expected_snapshot": _movement_snapshot(row)}
 
+    # A cancelled historical row may predate EBICS IDs/alias claims. Its bank
+    # reference still reserves that movement: never silently undo a user's
+    # cancellation through replay, even if date/amount were later changed.
+    for field in ("transaction_id", "reference_number"):
+        cancelled = _movement_rows("Bank Transaction", {
+            "bank_account": bank_account, "docstatus": 2,
+            field: ("in", list({value for _, value in references})),
+        }, ["name"], current=current, limit=1)
+        if cancelled:
+            return {**base, "state": "review", "reason": "cancelled_legacy_bank_reference"}
+
     # Protect historical native rows. Adopt only an exact bank-reference match;
     # a same-day/same-amount row with another reference is a review case, never
     # evidence that two genuine equal payments are the same movement.

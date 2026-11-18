@@ -99,6 +99,9 @@ und liest Referenzen und Bewegungen danach mit aktuellen Zeilensperren erneut.
 Vor einer Altübernahme müssen zusätzlich sämtliche zuvor gelesenen nativen
 Referenzen, Firma, Status, Bewegungs-ID, Inhalts-Hash, Herkunft und Änderungszeit
 unverändert sein. Ein anderer Bearbeiter darf nicht überschrieben werden.
+Auch eine noch unmarkierte, früher stornierte Altzeile sperrt die erneute
+Übernahme ihrer Bankreferenz; eine andere Referenz mit gleichem Datum und Betrag
+bleibt eine eigenständige Bewegung. Stornierungen werden nicht still aufgehoben.
 
 Die neue Tabelle und ihre Leserechte werden regulär mit der App migriert; die
 bestehenden 45 Custom-Field-Definitionen bleiben unverändert. Lokale
@@ -109,6 +112,9 @@ Native Abnahme ist ein eigener Schritt auf einem pausierten, isolierten Restore:
 Unveränderlichkeitsregeln sowie zwei unabhängige SQL-Sitzungen (gleichzeitiger
 Import und veraltete Repeatable-Read-Altübernahme). Synthetische Daten werden
 vollständig entfernt und Banktabellen sowie Finanzdaten mit Hashes verglichen.
+Die vier zwingenden nativen Fälle liegen in `native_ebics_movement_cases.py`,
+werden ausschliesslich explizit geladen und dürfen weder übersprungen werden
+noch die allgemeine Testsuche an einer anders benannten Testsite blockieren.
 Mit `--archive-connection` und `--expected-eur-evidence` wird zusätzlich der
 genau gepinnte Nachweis der fünf archivierten EUR-Positionen geprüft, das Archiv
 im Restore übernommen und erneut abgespielt. Ohne diesen Teil meldet der Lauf

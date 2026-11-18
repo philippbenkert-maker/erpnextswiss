@@ -1,5 +1,6 @@
 """Static contracts for the native EBICS movement mirror metadata."""
 
+import ast
 import json
 from pathlib import Path
 import unittest
@@ -49,6 +50,17 @@ class TestEbicsMovementMetadata(unittest.TestCase):
                          {"Accounts Manager", "System Manager"})
         for permission in schema["permissions"]:
             self.assertFalse(any(permission.get(key) for key in ("create", "write", "delete", "submit")))
+
+    def test_disposable_native_cases_are_explicit_and_do_not_enter_generic_discovery(self):
+        cases = ROOT / "erpnextswiss/erpnextswiss/tests/native_ebics_movement_cases.py"
+        self.assertTrue(cases.is_file())
+        self.assertFalse(cases.with_name("test_ebics_movement_native.py").exists())
+        tree = ast.parse(cases.read_text(encoding="utf-8"))
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                   and node.name == "TestEbicsMovementNative")
+        tests = [node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")]
+        self.assertEqual(len(tests), 4)
+        self.assertTrue(all(not node.decorator_list for node in tests))
 
 
 if __name__ == "__main__":

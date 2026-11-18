@@ -1,4 +1,4 @@
-"""Real SQL/ORM regressions, synthetic fixtures; no provider or payment booking.
+"""Dedicated real SQL/ORM cases; excluded from generic test-site discovery.
 
 Run only on the disposable restore through scripts/ebics_movement_native_check.py.
 The separate concurrency phase requires committed synthetic fixtures there.

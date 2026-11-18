@@ -19,7 +19,7 @@ import frappe
 
 from vat_accounting_integrity import accounting_digest
 from erpnextswiss.erpnextswiss import ebics_automation as auto
-from erpnextswiss.erpnextswiss.tests.test_ebics_movement_native import (
+from erpnextswiss.erpnextswiss.tests.native_ebics_movement_cases import (
     TestEbicsMovementNative, fixture, movement,
 )
 from erpnextswiss.scripts.bank_file_admission import BankFileError
@@ -194,7 +194,7 @@ def main():
         before, native_before = accounting_digest(), native_digest()
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestEbicsMovementNative)
         result = unittest.TextTestRunner(verbosity=2).run(suite)
-        assert result.wasSuccessful() and not result.skipped, "Native ORM/SQL tests failed"
+        assert result.wasSuccessful() and result.testsRun == 4 and not result.skipped, "Four native ORM/SQL tests required"
         frappe.db.rollback()
         concurrency = concurrent_checks()
         assert accounting_digest() == before and native_digest() == native_before, "Synthetic cleanup/invariance failed"

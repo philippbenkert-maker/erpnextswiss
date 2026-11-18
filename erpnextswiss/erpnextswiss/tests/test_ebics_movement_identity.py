@@ -336,6 +336,41 @@ class TestMovementIdentity(unittest.TestCase):
         self.store.tables["Bank Transaction"]["OLD"]["company"] = "OTHER"
         self.assertEqual(self.plan()["reason"], "legacy_bank_transaction_company_conflict")
 
+    def test_cancelled_unclaimed_legacy_reference_is_review_without_recreation(self):
+        for field in ("transaction_id", "reference_number"):
+            with self.subTest(field=field):
+                self.setUp()
+                self.legacy()
+                self.store.tables["Bank Transaction"]["OLD"].update(docstatus=2, transaction_id=None)
+                self.store.tables["Bank Transaction"]["OLD"][field] = "BANK-A"
+                result = self.api._mirror_bank_entry(self.connection, self.statement, self.entry,
+                                                      "D1", apply=True)
+                self.assertEqual(result["state"], "review")
+                self.assertEqual(len(self.store.tables["Bank Transaction"]), 1)
+                self.assertEqual(self.store.tables["Bank Transaction"]["OLD"]["docstatus"], 2)
+                self.assertFalse(self.store.tables["EBICS Movement Alias"])
+
+    def test_cancelled_legacy_reference_is_protected_across_date_and_amount_changes(self):
+        self.legacy()
+        self.store.tables["Bank Transaction"]["OLD"].update(docstatus=2, withdrawal=99, date="2026-11-16")
+        self.assertEqual(self.plan()["state"], "review")
+
+    def test_cancelled_distinct_reference_does_not_block_another_equal_payment(self):
+        self.legacy()
+        self.store.tables["Bank Transaction"]["OLD"].update(docstatus=2, transaction_id="OTHER-REFERENCE")
+        self.assertEqual(self.apply()["state"], "created")
+        self.assertEqual(len(self.store.tables["Bank Transaction"]), 2)
+        self.assertEqual(self.store.tables["Bank Transaction"]["OLD"]["docstatus"], 2)
+
+    def test_apply_detects_cancelled_legacy_created_after_snapshot_plan(self):
+        plan = self.plan()
+        self.store.stale_tables = deepcopy(self.store.tables)
+        self.legacy()
+        self.store.tables["Bank Transaction"]["OLD"]["docstatus"] = 2
+        with self.assertRaises(BankFileError):
+            self.apply(plan=plan)
+        self.assertEqual(len(self.store.tables["Bank Transaction"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
