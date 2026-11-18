@@ -33,6 +33,23 @@ class TestEbicsMovementMetadata(unittest.TestCase):
         self.assertEqual(fields["movement_map_json"]["fieldtype"], "Code")
         self.assertEqual(fields["movement_map_json"]["read_only"], 1)
 
+    def test_alias_registry_has_persistent_unique_identity_and_read_only_permissions(self):
+        schema = json.loads((ROOT / "erpnextswiss" / "erpnextswiss" / "doctype"
+                             / "ebics_movement_alias" / "ebics_movement_alias.json")
+                            .read_text(encoding="utf-8"))
+        fields = {row["fieldname"]: row for row in schema["fields"]}
+        self.assertEqual(schema["autoname"], "field:alias_id")
+        self.assertEqual(schema["allow_rename"], 0)
+        self.assertEqual(fields["alias_id"]["unique"], 1)
+        self.assertEqual(fields["bank_transaction"]["options"], "Bank Transaction")
+        for field in fields.values():
+            self.assertEqual(field["read_only"], 1)
+            self.assertEqual(field["reqd"], 1)
+        self.assertEqual({p["role"] for p in schema["permissions"]},
+                         {"Accounts Manager", "System Manager"})
+        for permission in schema["permissions"]:
+            self.assertFalse(any(permission.get(key) for key in ("create", "write", "delete", "submit")))
+
 
 if __name__ == "__main__":
     unittest.main()

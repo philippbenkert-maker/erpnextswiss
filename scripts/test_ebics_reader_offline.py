@@ -20,6 +20,7 @@ with tempfile.TemporaryDirectory(prefix="ebics-tests-") as directory:
               patch.object(socket.socket, "connect_ex", side_effect=RuntimeError("Offline tests: no network"))):
             suite = unittest.defaultTestLoader.loadTestsFromNames([
                 "erpnextswiss.erpnextswiss.tests.test_ebics_automation",
+                "erpnextswiss.erpnextswiss.tests.test_ebics_movement_identity",
                 "erpnextswiss.erpnextswiss.tests.test_python_ebics_reader",
                 "erpnextswiss.erpnextswiss.tests.test_match_payments",
             ])

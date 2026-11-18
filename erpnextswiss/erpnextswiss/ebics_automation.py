@@ -29,6 +29,11 @@ _RECEIPT_NAME = re.compile(r"statement-[0-9]{3}\.xml\Z")
 _MOVEMENT_ID_FIELD = "custom_ebics_movement_id"
 _MOVEMENT_FINGERPRINT_FIELD = "custom_ebics_movement_fingerprint"
 _MOVEMENT_SOURCE_FIELD = "custom_ebics_source_download"
+_MOVEMENT_ROW_FIELDS = [
+    "name", "docstatus", "date", "company", "bank_account", "currency", "deposit", "withdrawal",
+    "transaction_id", "reference_number", "modified", _MOVEMENT_ID_FIELD,
+    _MOVEMENT_FINGERPRINT_FIELD, _MOVEMENT_SOURCE_FIELD,
+]
 
 
 def _archive_bytes(data):
@@ -327,8 +332,8 @@ def _one_reference(values):
     return normalized[0] if len(normalized) == 1 else None
 
 
-def _movement_reference(entry):
-    """Select one bank-issued entry identity; never invent one from amount/date."""
+def _movement_references(entry):
+    """Keep every unambiguous bank ID so 053/054 enrichment retains its lineage."""
     references = entry.get("bank_reference_ids") or {}
     detail_count = int(entry.get("detail_count") or 0)
     priorities = []
@@ -347,19 +352,26 @@ def _movement_reference(entry):
     if detail_count == 1:
         priorities.extend((
             ("transaction_id", references.get("transaction_id")),
-            ("payment_information_id", references.get("payment_information_id")),
         ))
+    result = []
     for kind, values in priorities:
         value = _one_reference(values)
         if value:
-            return kind, value
+            result.append((kind, value))
 
-    # Compatibility with previews produced before structured bank IDs existed.
-    if detail_count == 1:
+    # PmtInfId identifies a payment group, not an individual bank movement.
+    # Never promote it (or an ambiguous structured ID) through the old fallback.
+    # Compatibility is limited to previews without structured reference fields.
+    if not references and not result and detail_count == 1:
         value = _one_reference(entry.get("bank_detail_references"))
         if value:
-            return "detail_reference", value
-    return None
+            result.append(("detail_reference", value))
+    return result
+
+
+def _movement_reference(entry):
+    references = _movement_references(entry)
+    return references[0] if references else None
 
 
 def _movement_identity(connection, statement, kind, reference):
@@ -374,12 +386,10 @@ def _movement_fingerprint(connection, statement, entry, kind, reference):
     if amount is None:
         return None
     payload = {
-        "version": 1,
+        "version": 2,
         "company": connection.company,
         "account": statement["account"],
         "currency": statement["currency"],
-        "reference_kind": kind,
-        "reference": reference.upper(),
         "booking_date": (entry.get("booking_date") or "")[:10],
         "value_date": (entry.get("value_date") or "")[:10],
         "amount": format(amount, "f"),
@@ -389,10 +399,10 @@ def _movement_fingerprint(connection, statement, entry, kind, reference):
                              separators=(",", ":")).encode()).hexdigest()
 
 
-def _statement_bank_account(connection, statement):
-    rows = frappe.get_all("Bank Account", filters={
+def _statement_bank_account(connection, statement, *, current=False):
+    rows = frappe.db.get_values("Bank Account", filters={
         "account": statement["account"], "is_company_account": 1,
-    }, fields=["name", "company"], limit_page_length=2)
+    }, fieldname=["name", "company"], as_dict=True, limit=2, for_update=current)
     if (len(rows) != 1 or rows[0].get("company") != connection.company):
         raise BankFileError("The ledger account has no unique company Bank Account mapping")
     return rows[0]["name"]
@@ -424,7 +434,7 @@ def _movement_party(entry):
     }
 
 
-def _movement_shape_matches(row, bank_account, statement, entry):
+def _movement_shape_matches(row, bank_account, statement, entry, *, company=None):
     amount = _money(entry.get("amount"))
     if amount is None:
         return False
@@ -436,92 +446,176 @@ def _movement_shape_matches(row, bank_account, statement, entry):
     expected_deposit = amount if entry.get("credit_debit") == "CRDT" else Decimal("0.00")
     expected_withdrawal = amount if entry.get("credit_debit") == "DBIT" else Decimal("0.00")
     return (row.get("bank_account") == bank_account
+            and (company is None or row.get("company") == company)
             and row.get("currency") == statement.get("currency")
             and str(row.get("date"))[:10] == (entry.get("booking_date") or "")[:10]
             and deposit == expected_deposit and withdrawal == expected_withdrawal)
 
 
-def _movement_plan(connection, statement, entry):
+def _movement_snapshot(row):
+    """Compare the entire claim and native reference state under a current row lock."""
+    values = {field: None if row.get(field) is None else str(row.get(field))
+              for field in _MOVEMENT_ROW_FIELDS}
+    return sha256(json.dumps(values, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _movement_rows(doctype, filters, fields, *, current, limit):
+    # A regular repeatable-read snapshot remains stale even after another SELECT
+    # acquired a lock. Every apply-path lookup must itself be a locking read.
+    return frappe.db.get_values(doctype, filters, fields, as_dict=True,
+                                for_update=current, limit=limit)
+
+
+def _movement_plan(connection, statement, entry, *, current=False):
     if (entry.get("issues") or entry.get("status") != "BOOK"
             or entry.get("credit_debit") not in ("CRDT", "DBIT")
             or _money(entry.get("amount")) is None
             or not (entry.get("booking_date") or "")[:10]):
         return {"state": "review", "reason": "entry_not_safe_to_mirror"}
-    selected = _movement_reference(entry)
-    if selected is None:
+    references = _movement_references(entry)
+    if not references:
         return {"state": "review", "reason": "missing_unique_bank_reference"}
-    kind, reference = selected
-    bank_account = _statement_bank_account(connection, statement)
+    kind, reference = references[0]
+    bank_account = _statement_bank_account(connection, statement, current=current)
     identity = _movement_identity(connection, statement, kind, reference)
+    aliases = sorted({_movement_identity(connection, statement, key, value)
+                      for key, value in references})
     fingerprint = _movement_fingerprint(connection, statement, entry, kind, reference)
-    fields = ["name", "docstatus", "date", "bank_account", "currency", "deposit", "withdrawal",
-              "transaction_id", "reference_number", _MOVEMENT_ID_FIELD,
-              _MOVEMENT_FINGERPRINT_FIELD]
-    existing = frappe.get_all("Bank Transaction", filters={
-        _MOVEMENT_ID_FIELD: identity, "docstatus": ("<", 2),
-    }, fields=fields, limit_page_length=2)
-    if len(existing) > 1:
-        raise BankFileError("The EBICS movement identity is not unique")
     base = {
         "identity": identity, "fingerprint": fingerprint, "kind": kind,
-        "reference": reference, "bank_account": bank_account,
+        "reference": reference, "bank_account": bank_account, "aliases": aliases,
         "entry_sha256": sha256(entry["xml"].encode("utf-8")).hexdigest(),
         "description": _movement_description(entry, reference),
         "party": _movement_party(entry),
     }
+    claims = _movement_rows("EBICS Movement Alias", {"alias_id": ("in", aliases)},
+                            ["alias_id", "bank_transaction", "company", "bank_account", "account", "currency"],
+                            current=current, limit=len(aliases) + 1)
+    if any(claim.get("company") != connection.company
+           or claim.get("bank_account") != bank_account
+           or claim.get("account") != statement["account"]
+           or claim.get("currency") != statement["currency"] for claim in claims):
+        return {**base, "state": "review", "reason": "bank_alias_scope_conflict"}
+    existing = _movement_rows("Bank Transaction", {_MOVEMENT_ID_FIELD: ("in", aliases)},
+                               _MOVEMENT_ROW_FIELDS, current=current, limit=len(aliases) + 1)
+    targets = {claim["bank_transaction"] for claim in claims} | {row["name"] for row in existing}
+    if len(targets) > 1:
+        return {**base, "state": "review", "reason": "bank_alias_multiple_movements"}
+    if targets:
+        existing = _movement_rows("Bank Transaction", {"name": next(iter(targets))},
+                                   _MOVEMENT_ROW_FIELDS, current=current, limit=2)
+        if len(existing) != 1:
+            return {**base, "state": "review", "reason": "bank_alias_target_missing"}
     if existing:
         row = existing[0]
-        if (row.get(_MOVEMENT_FINGERPRINT_FIELD) != fingerprint
-                or not _movement_shape_matches(row, bank_account, statement, entry)):
+        if (row.get("docstatus") != 1 or not row.get(_MOVEMENT_ID_FIELD)
+                or row.get(_MOVEMENT_FINGERPRINT_FIELD) != fingerprint
+                or not _movement_shape_matches(row, bank_account, statement, entry, company=connection.company)):
             return {**base, "state": "review", "reason": "bank_identity_content_conflict"}
-        return {**base, "state": "existing", "bank_transaction": row["name"]}
+        return {**base, "identity": row[_MOVEMENT_ID_FIELD],
+                "state": "existing", "bank_transaction": row["name"],
+                "expected_snapshot": _movement_snapshot(row)}
 
     # Protect historical native rows. Adopt only an exact bank-reference match;
     # a same-day/same-amount row with another reference is a review case, never
     # evidence that two genuine equal payments are the same movement.
-    candidates = frappe.get_all("Bank Transaction", filters={
+    candidates = _movement_rows("Bank Transaction", {
         "bank_account": bank_account, "date": (entry.get("booking_date") or "")[:10],
         "currency": statement["currency"], "docstatus": ("<", 2),
-    }, fields=fields, limit_page_length=21)
+    }, _MOVEMENT_ROW_FIELDS, current=current, limit=21)
     if len(candidates) >= 21:
         return {**base, "state": "review", "reason": "legacy_candidate_limit"}
     shape = [row for row in candidates
              if not row.get(_MOVEMENT_ID_FIELD)
              and _movement_shape_matches(row, bank_account, statement, entry)]
-    normalized = reference.upper()
-    exact = [row for row in shape if normalized in {
+    if any(row.get("company") != connection.company for row in shape):
+        return {**base, "state": "review", "reason": "legacy_bank_transaction_company_conflict"}
+    normalized = {value.upper() for _, value in references}
+    exact = [row for row in shape if normalized.intersection({
         value.upper() for value in (_normal_reference(row.get("transaction_id")),
                                     _normal_reference(row.get("reference_number"))) if value
-    }]
+    }) and row.get("docstatus") == 1
+        and not row.get(_MOVEMENT_FINGERPRINT_FIELD) and not row.get(_MOVEMENT_SOURCE_FIELD)]
     if len(exact) == 1:
-        return {**base, "state": "adopt", "bank_transaction": exact[0]["name"]}
+        return {**base, "state": "adopt", "bank_transaction": exact[0]["name"],
+                "expected_snapshot": _movement_snapshot(exact[0])}
     if exact or shape:
         return {**base, "state": "review", "reason": "legacy_bank_transaction_conflict"}
     return {**base, "state": "create"}
 
 
+def _claim_movement_aliases(connection, statement, source_download, transaction, plan):
+    for alias in plan["aliases"]:
+        claims = _movement_rows("EBICS Movement Alias", {"alias_id": alias},
+                                ["bank_transaction"], current=True, limit=2)
+        if claims:
+            if len(claims) != 1 or claims[0]["bank_transaction"] != transaction.name:
+                raise BankFileError("Bank reference was claimed by another movement")
+            continue
+        # Both the immutable document name and alias_id unique index enforce one
+        # persistent owner, including across connections and concurrent workers.
+        frappe.get_doc({
+            "doctype": "EBICS Movement Alias", "alias_id": alias,
+            "bank_transaction": transaction.name, "company": connection.company,
+            "bank_account": plan["bank_account"], "account": statement["account"],
+            "currency": statement["currency"], "source_download": source_download,
+        }).insert(ignore_permissions=True)
+
+
 def _apply_movement_plan(connection, statement, entry, source_download, plan):
-    if plan["state"] == "existing":
+    if plan["state"] not in {"create", "adopt", "existing"}:
         return plan
     savepoint = "ebics_movement_" + plan["identity"][-20:]
     frappe.db.savepoint(savepoint)
     try:
+        # Serialize by native account, not connection or preferred reference.
+        # Different EBICS connections/053/054 can share the same bank account.
+        locked_account = _statement_bank_account(connection, statement, current=True)
+        if locked_account != plan["bank_account"]:
+            raise BankFileError("Bank Account mapping changed during EBICS mirroring")
         if plan["state"] == "adopt":
-            transaction = frappe.get_doc("Bank Transaction", plan["bank_transaction"])
-            if (transaction.docstatus >= 2
-                    or not _movement_shape_matches(transaction, plan["bank_account"], statement, entry)):
+            transaction = frappe.get_doc("Bank Transaction", plan["bank_transaction"], for_update=True)
+            if (_movement_snapshot(transaction) != plan["expected_snapshot"]
+                    or transaction.docstatus >= 2
+                    or any(transaction.get(field) for field in (
+                        _MOVEMENT_ID_FIELD, _MOVEMENT_FINGERPRINT_FIELD, _MOVEMENT_SOURCE_FIELD))
+                    or not _movement_shape_matches(transaction, plan["bank_account"], statement, entry,
+                                                   company=connection.company)):
                 raise BankFileError("Historical Bank Transaction changed during EBICS adoption")
+        fresh = _movement_plan(connection, statement, entry, current=True)
+        if fresh["state"] == "review":
+            raise BankFileError("Bank movement changed during EBICS mirroring: " + fresh["reason"])
+        if plan["state"] == "existing" and (
+                fresh["state"] != "existing" or fresh["bank_transaction"] != plan["bank_transaction"]):
+            raise BankFileError("Existing Bank Transaction claim changed during EBICS mirroring")
+        if plan["state"] == "adopt" and (
+                fresh["state"] != "adopt" or fresh["bank_transaction"] != plan["bank_transaction"]
+                or fresh["expected_snapshot"] != plan["expected_snapshot"]):
+            raise BankFileError("Historical Bank Transaction claim changed during EBICS adoption")
+        plan = fresh
+        if plan["state"] == "existing":
+            transaction = frappe.get_doc("Bank Transaction", plan["bank_transaction"], for_update=True)
+            if _movement_snapshot(transaction) != plan["expected_snapshot"]:
+                raise BankFileError("Bank Transaction changed while retaining bank references")
+            _claim_movement_aliases(connection, statement, source_download, transaction, plan)
+            return plan
+        if plan["state"] == "adopt":
+            transaction = frappe.get_doc("Bank Transaction", plan["bank_transaction"], for_update=True)
+            if _movement_snapshot(transaction) != plan["expected_snapshot"]:
+                raise BankFileError("Historical Bank Transaction changed before EBICS adoption")
             transaction.db_set({
                 _MOVEMENT_ID_FIELD: plan["identity"],
                 _MOVEMENT_FINGERPRINT_FIELD: plan["fingerprint"],
                 _MOVEMENT_SOURCE_FIELD: source_download,
             }, commit=False)
+            _claim_movement_aliases(connection, statement, source_download, transaction, plan)
             return {**plan, "state": "adopted"}
         if plan["state"] != "create":
             return plan
         amount = _money(entry["amount"])
         values = {
             "doctype": "Bank Transaction",
+            "company": connection.company,
             "date": (entry.get("booking_date") or "")[:10],
             "bank_account": plan["bank_account"],
             "currency": statement["currency"],
@@ -539,11 +633,13 @@ def _apply_movement_plan(connection, statement, entry, source_download, plan):
         transaction = frappe.get_doc(values).insert(ignore_permissions=True)
         transaction.submit()
         if (transaction.docstatus != 1
-                or not _movement_shape_matches(transaction, plan["bank_account"], statement, entry)
+                or not _movement_shape_matches(transaction, plan["bank_account"], statement, entry,
+                                               company=connection.company)
                 or transaction.get(_MOVEMENT_ID_FIELD) != plan["identity"]
                 or transaction.get(_MOVEMENT_FINGERPRINT_FIELD) != plan["fingerprint"]
                 or transaction.payment_entries):
             raise BankFileError("Native Bank Transaction differs from the verified EBICS movement")
+        _claim_movement_aliases(connection, statement, source_download, transaction, plan)
         return {**plan, "state": "created", "bank_transaction": transaction.name}
     except Exception:
         frappe.db.rollback(save_point=savepoint)
@@ -556,12 +652,16 @@ def _mirror_bank_entry(connection, statement, entry, source_download, *, apply, 
         return plan
     if not apply:
         if planned is not None:
-            previous = planned.get(plan["identity"])
+            previous = [planned[alias] for alias in plan["aliases"] if alias in planned]
             if previous:
-                if previous["fingerprint"] != plan["fingerprint"]:
+                if any(item["fingerprint"] != plan["fingerprint"]
+                       or item["identity"] != previous[0]["identity"] for item in previous):
                     return {**plan, "state": "review", "reason": "bank_identity_content_conflict"}
+                plan = {**plan, "identity": previous[0]["identity"]}
+            for alias in plan["aliases"]:
+                planned[alias] = plan
+            if previous:
                 return {**plan, "state": "existing_in_plan"}
-            planned[plan["identity"]] = plan
         return {**plan, "state": "would_" + plan["state"]}
     return _apply_movement_plan(connection, statement, entry, source_download, plan)
 

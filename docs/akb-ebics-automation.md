@@ -67,12 +67,20 @@ Einzahlungs- oder Auszahlungsseite. Er erzeugt weder `GL Entry` noch
 `Reconciled`.
 
 Die fachliche Identität stammt ausschliesslich aus einer eindeutigen
-bankseitigen Referenz. Bevorzugt werden ein einzelner UETR sowie die
-Account-Service-, Entry-, Transaktions- oder Zahlungsinformationsreferenz.
+bankseitigen Referenz. Ein einzelner UETR sowie Account-Service-, Entry- und
+Transaktionsreferenzen werden gemeinsam auf dieselbe native Bewegung gebunden.
+`PmtInfId` bezeichnet eine Zahlungsgruppe und wird dafür nicht verwendet.
 Betrag, Datum oder Gegenpartei allein werden nie als Identität erfunden. Eine
 gleiche Bank-ID mit geändertem Betrag, Datum, Richtung oder Konto bleibt zur
 Prüfung. Dadurch überlappen camt.053 und camt.054 nicht doppelt, sofern sie die
-gleiche belastbare Bank-ID führen. Jede Quellposition wird im bestätigten
+gleiche belastbare Bank-ID führen. Die ursprüngliche Bewegungs-ID bleibt auch
+bei einer später ergänzten UETR erhalten. Die unveränderliche Tabelle
+`EBICS Movement Alias` bindet jede konten- und währungsgebundene Referenz über
+einen eindeutigen Datenbankschlüssel an genau eine Bewegung. Der Inhalts-Hash
+enthält keine wechselnde bevorzugte Referenz. Bereits mit dem früheren
+referenzabhängigen Hash markierte Zeilen werden bei Abweichung zur Prüfung
+gestellt; sie werden weder still ummarkiert noch nochmals angelegt.
+Jede Quellposition wird im bestätigten
 `EBICS Download` mit Datei-, Statement-, Entry-Hash und nativer
 Bankbewegungsnummer protokolliert.
 
@@ -85,6 +93,27 @@ reiner Dry-Run. `apply=True` wird vollständig verweigert, solange der Plan auch
 nur einen ungeklärten Eintrag enthält. Der anschliessende Apply-Lauf prüft alle
 Identitäten erneut und schreibt atomar; bei Fehler wird der gesamte Backfill
 zurückgerollt. Hauptbuch, Zahlungen und Bankprovider bleiben unverändert.
+
+Der Schreibpfad sperrt das Firmenbankkonto unabhängig von der EBICS-Verbindung
+und liest Referenzen und Bewegungen danach mit aktuellen Zeilensperren erneut.
+Vor einer Altübernahme müssen zusätzlich sämtliche zuvor gelesenen nativen
+Referenzen, Firma, Status, Bewegungs-ID, Inhalts-Hash, Herkunft und Änderungszeit
+unverändert sein. Ein anderer Bearbeiter darf nicht überschrieben werden.
+
+Die neue Tabelle und ihre Leserechte werden regulär mit der App migriert; die
+bestehenden 45 Custom-Field-Definitionen bleiben unverändert. Lokale
+Verhaltenstests: `python -I -S -B scripts/test_ebics_movement_offline.py`.
+Der vollständige Offline-Adapterlauf bleibt `scripts/test_ebics_reader_offline.py`.
+Native Abnahme ist ein eigener Schritt auf einem pausierten, isolierten Restore:
+`scripts/ebics_movement_native_check.py` prüft echte Insert/Submit-, Unique- und
+Unveränderlichkeitsregeln sowie zwei unabhängige SQL-Sitzungen (gleichzeitiger
+Import und veraltete Repeatable-Read-Altübernahme). Synthetische Daten werden
+vollständig entfernt und Banktabellen sowie Finanzdaten mit Hashes verglichen.
+Mit `--archive-connection` und `--expected-eur-evidence` wird zusätzlich der
+genau gepinnte Nachweis der fünf archivierten EUR-Positionen geprüft, das Archiv
+im Restore übernommen und erneut abgespielt. Ohne diesen Teil meldet der Lauf
+ausdrücklich `SYNTHETIC_PASS_ARCHIVE_NOT_RUN`. Er ist keine Produktionsfreigabe;
+Produktivmigration, freigegebener Backfill und Sichtprüfung bleiben notwendig.
 
 ## Vertragliches Skonto und Wiederprüfung
 

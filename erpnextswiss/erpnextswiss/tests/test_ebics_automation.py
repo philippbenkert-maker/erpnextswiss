@@ -800,8 +800,8 @@ class TestEbicsAutomation(TestCase):
         connection = MagicMock(company='KT Wärmesysteme AG')
         statement, entry = self._movement_entry()
         bank_account = frappe._dict(name='Firmenkonto EUR', company=connection.company)
-        with patch.object(automation.frappe, 'get_all', side_effect=[
-                [bank_account], [], [], [bank_account], [], []]):
+        with patch.object(automation.frappe.db, 'get_values', side_effect=[
+                [bank_account], [], [], [], [bank_account], [], [], []]):
             first = automation._movement_plan(connection, statement, entry)
             second = automation._movement_plan(connection, statement, dict(entry))
         self.assertEqual(first['state'], 'create')
@@ -823,14 +823,14 @@ class TestEbicsAutomation(TestCase):
         bank_account = frappe._dict(name='Firmenkonto EUR', company=connection.company)
         legacy = frappe._dict(
             name='ACC-BTN-2026-00001', docstatus=1, date='2026-11-17',
-            bank_account=bank_account.name, currency='EUR', deposit=0, withdrawal=100,
+            company=connection.company, bank_account=bank_account.name, currency='EUR', deposit=0, withdrawal=100,
             transaction_id='BANK-REF-1', reference_number=None,
             custom_ebics_movement_id=None, custom_ebics_movement_fingerprint=None)
-        with patch.object(automation.frappe, 'get_all', side_effect=[[bank_account], [], [legacy]]):
+        with patch.object(automation.frappe.db, 'get_values', side_effect=[[bank_account], [], [], [legacy]]):
             self.assertEqual(automation._movement_plan(connection, statement, entry)['state'], 'adopt')
 
         legacy.transaction_id = 'ANOTHER-REAL-MOVEMENT'
-        with patch.object(automation.frappe, 'get_all', side_effect=[[bank_account], [], [legacy]]):
+        with patch.object(automation.frappe.db, 'get_values', side_effect=[[bank_account], [], [], [legacy]]):
             result = automation._movement_plan(connection, statement, entry)
         self.assertEqual(result['state'], 'review')
         self.assertEqual(result['reason'], 'legacy_bank_transaction_conflict')
@@ -842,7 +842,7 @@ class TestEbicsAutomation(TestCase):
             'state': 'create', 'identity': 'EBICS-MOV-' + 'a' * 64,
             'fingerprint': 'b' * 64, 'reference': 'BANK-MOVEMENT-1',
             'bank_account': 'Firmenkonto EUR', 'description': 'Bank movement',
-            'party': {}, 'entry_sha256': 'c' * 64,
+            'party': {}, 'entry_sha256': 'c' * 64, 'aliases': ['EBICS-MOV-' + 'a' * 64],
         }
         values = {}
         transaction = MagicMock()
@@ -863,9 +863,14 @@ class TestEbicsAutomation(TestCase):
         with (patch.object(automation.frappe, 'get_doc', side_effect=lambda payload: (
                 values.update(payload) or transaction)),
               patch.object(automation.frappe.db, 'savepoint'),
-              patch.object(automation.frappe.db, 'rollback')):
+              patch.object(automation.frappe.db, 'rollback'),
+              patch.object(automation, '_statement_bank_account', return_value=plan['bank_account']),
+              patch.object(automation, '_movement_plan', return_value=plan) as recheck,
+              patch.object(automation, '_claim_movement_aliases') as claim):
             result = automation._apply_movement_plan(
                 connection, statement, entry, 'EBICS-DOWNLOAD-1', plan)
+        recheck.assert_called_once_with(connection, statement, entry, current=True)
+        claim.assert_called_once_with(connection, statement, 'EBICS-DOWNLOAD-1', transaction, plan)
         self.assertEqual(result['state'], 'created')
         transaction.insert.assert_called_once_with(ignore_permissions=True)
         transaction.submit.assert_called_once_with()
