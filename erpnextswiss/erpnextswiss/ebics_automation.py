@@ -21,10 +21,14 @@ from erpnextswiss.scripts.bank_file_admission import BankFileError, MAX_FILE_BYT
 
 PROFILE = "camt.053.001.08"
 STATEMENT_PROFILES = {"04": "camt.053.001.04", "08": PROFILE}
+MOVEMENT_PROFILES = set(STATEMENT_PROFILES.values()) | {"camt.054.001.08"}
 MAX_DOWNLOADS_PER_RUN = 14
 MAX_ARCHIVED_DOWNLOADS = 10000
 _TRANSACTION_ID = re.compile(r"[A-Za-z0-9_-]{1,100}\Z")
 _RECEIPT_NAME = re.compile(r"statement-[0-9]{3}\.xml\Z")
+_MOVEMENT_ID_FIELD = "custom_ebics_movement_id"
+_MOVEMENT_FINGERPRINT_FIELD = "custom_ebics_movement_fingerprint"
+_MOVEMENT_SOURCE_FIELD = "custom_ebics_source_download"
 
 
 def _archive_bytes(data):
@@ -306,6 +310,288 @@ def _money(value):
     except (InvalidOperation, TypeError, ValueError):
         return None
     return amount if amount > 0 and amount == rounded else None
+
+
+def _normal_reference(value):
+    if not isinstance(value, str):
+        return None
+    value = " ".join(value.split()).strip()
+    if not value or value.upper().replace(" ", "") in {"NOTPROVIDED", "NONREF"}:
+        return None
+    return value
+
+
+def _one_reference(values):
+    normalized = list(dict.fromkeys(value for item in (values or [])
+                                    for value in [_normal_reference(item)] if value))
+    return normalized[0] if len(normalized) == 1 else None
+
+
+def _movement_reference(entry):
+    """Select one bank-issued entry identity; never invent one from amount/date."""
+    references = entry.get("bank_reference_ids") or {}
+    detail_count = int(entry.get("detail_count") or 0)
+    priorities = []
+    if detail_count == 1:
+        priorities.extend((
+            ("uetr", references.get("uetr")),
+            ("detail_account_service_reference",
+             references.get("detail_account_service_reference")),
+        ))
+    priorities.extend((
+        ("account_service_reference", references.get("account_service_reference")
+         or [entry.get("reference")]),
+        ("entry_reference", references.get("entry_reference")
+         or [entry.get("entry_reference")]),
+    ))
+    if detail_count == 1:
+        priorities.extend((
+            ("transaction_id", references.get("transaction_id")),
+            ("payment_information_id", references.get("payment_information_id")),
+        ))
+    for kind, values in priorities:
+        value = _one_reference(values)
+        if value:
+            return kind, value
+
+    # Compatibility with previews produced before structured bank IDs existed.
+    if detail_count == 1:
+        value = _one_reference(entry.get("bank_detail_references"))
+        if value:
+            return "detail_reference", value
+    return None
+
+
+def _movement_identity(connection, statement, kind, reference):
+    payload = ["ebics-movement-v1", connection.company, statement["account"],
+               statement["currency"], kind, reference.upper()]
+    return "EBICS-MOV-" + sha256(json.dumps(payload, ensure_ascii=False,
+                                             separators=(",", ":")).encode()).hexdigest()
+
+
+def _movement_fingerprint(connection, statement, entry, kind, reference):
+    amount = _money(entry.get("amount"))
+    if amount is None:
+        return None
+    payload = {
+        "version": 1,
+        "company": connection.company,
+        "account": statement["account"],
+        "currency": statement["currency"],
+        "reference_kind": kind,
+        "reference": reference.upper(),
+        "booking_date": (entry.get("booking_date") or "")[:10],
+        "value_date": (entry.get("value_date") or "")[:10],
+        "amount": format(amount, "f"),
+        "credit_debit": entry.get("credit_debit"),
+    }
+    return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":")).encode()).hexdigest()
+
+
+def _statement_bank_account(connection, statement):
+    rows = frappe.get_all("Bank Account", filters={
+        "account": statement["account"], "is_company_account": 1,
+    }, fields=["name", "company"], limit_page_length=2)
+    if (len(rows) != 1 or rows[0].get("company") != connection.company):
+        raise BankFileError("The ledger account has no unique company Bank Account mapping")
+    return rows[0]["name"]
+
+
+def _movement_description(entry, reference):
+    values = []
+    for candidate in entry.get("candidates") or []:
+        for key in ("party_name", "transaction_reference"):
+            value = _normal_reference(candidate.get(key))
+            if value and value not in values:
+                values.append(value)
+    if not values:
+        values.append(reference)
+    return " | ".join(values)[:1000]
+
+
+def _movement_party(entry):
+    candidates = entry.get("candidates") or []
+    parties = {(candidate.get("party_name"), candidate.get("party_iban"))
+               for candidate in candidates
+               if candidate.get("party_name") or candidate.get("party_iban")}
+    if len(parties) != 1:
+        return {}
+    bank_name, bank_iban = next(iter(parties))
+    return {
+        "bank_party_name": bank_name,
+        "bank_party_iban": bank_iban,
+    }
+
+
+def _movement_shape_matches(row, bank_account, statement, entry):
+    amount = _money(entry.get("amount"))
+    if amount is None:
+        return False
+    try:
+        deposit = Decimal(str(row.get("deposit") or 0)).quantize(Decimal("0.01"))
+        withdrawal = Decimal(str(row.get("withdrawal") or 0)).quantize(Decimal("0.01"))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    expected_deposit = amount if entry.get("credit_debit") == "CRDT" else Decimal("0.00")
+    expected_withdrawal = amount if entry.get("credit_debit") == "DBIT" else Decimal("0.00")
+    return (row.get("bank_account") == bank_account
+            and row.get("currency") == statement.get("currency")
+            and str(row.get("date"))[:10] == (entry.get("booking_date") or "")[:10]
+            and deposit == expected_deposit and withdrawal == expected_withdrawal)
+
+
+def _movement_plan(connection, statement, entry):
+    if (entry.get("issues") or entry.get("status") != "BOOK"
+            or entry.get("credit_debit") not in ("CRDT", "DBIT")
+            or _money(entry.get("amount")) is None
+            or not (entry.get("booking_date") or "")[:10]):
+        return {"state": "review", "reason": "entry_not_safe_to_mirror"}
+    selected = _movement_reference(entry)
+    if selected is None:
+        return {"state": "review", "reason": "missing_unique_bank_reference"}
+    kind, reference = selected
+    bank_account = _statement_bank_account(connection, statement)
+    identity = _movement_identity(connection, statement, kind, reference)
+    fingerprint = _movement_fingerprint(connection, statement, entry, kind, reference)
+    fields = ["name", "docstatus", "date", "bank_account", "currency", "deposit", "withdrawal",
+              "transaction_id", "reference_number", _MOVEMENT_ID_FIELD,
+              _MOVEMENT_FINGERPRINT_FIELD]
+    existing = frappe.get_all("Bank Transaction", filters={
+        _MOVEMENT_ID_FIELD: identity, "docstatus": ("<", 2),
+    }, fields=fields, limit_page_length=2)
+    if len(existing) > 1:
+        raise BankFileError("The EBICS movement identity is not unique")
+    base = {
+        "identity": identity, "fingerprint": fingerprint, "kind": kind,
+        "reference": reference, "bank_account": bank_account,
+        "entry_sha256": sha256(entry["xml"].encode("utf-8")).hexdigest(),
+        "description": _movement_description(entry, reference),
+        "party": _movement_party(entry),
+    }
+    if existing:
+        row = existing[0]
+        if (row.get(_MOVEMENT_FINGERPRINT_FIELD) != fingerprint
+                or not _movement_shape_matches(row, bank_account, statement, entry)):
+            return {**base, "state": "review", "reason": "bank_identity_content_conflict"}
+        return {**base, "state": "existing", "bank_transaction": row["name"]}
+
+    # Protect historical native rows. Adopt only an exact bank-reference match;
+    # a same-day/same-amount row with another reference is a review case, never
+    # evidence that two genuine equal payments are the same movement.
+    candidates = frappe.get_all("Bank Transaction", filters={
+        "bank_account": bank_account, "date": (entry.get("booking_date") or "")[:10],
+        "currency": statement["currency"], "docstatus": ("<", 2),
+    }, fields=fields, limit_page_length=21)
+    if len(candidates) >= 21:
+        return {**base, "state": "review", "reason": "legacy_candidate_limit"}
+    shape = [row for row in candidates
+             if not row.get(_MOVEMENT_ID_FIELD)
+             and _movement_shape_matches(row, bank_account, statement, entry)]
+    normalized = reference.upper()
+    exact = [row for row in shape if normalized in {
+        value.upper() for value in (_normal_reference(row.get("transaction_id")),
+                                    _normal_reference(row.get("reference_number"))) if value
+    }]
+    if len(exact) == 1:
+        return {**base, "state": "adopt", "bank_transaction": exact[0]["name"]}
+    if exact or shape:
+        return {**base, "state": "review", "reason": "legacy_bank_transaction_conflict"}
+    return {**base, "state": "create"}
+
+
+def _apply_movement_plan(connection, statement, entry, source_download, plan):
+    if plan["state"] == "existing":
+        return plan
+    savepoint = "ebics_movement_" + plan["identity"][-20:]
+    frappe.db.savepoint(savepoint)
+    try:
+        if plan["state"] == "adopt":
+            transaction = frappe.get_doc("Bank Transaction", plan["bank_transaction"])
+            if (transaction.docstatus >= 2
+                    or not _movement_shape_matches(transaction, plan["bank_account"], statement, entry)):
+                raise BankFileError("Historical Bank Transaction changed during EBICS adoption")
+            transaction.db_set({
+                _MOVEMENT_ID_FIELD: plan["identity"],
+                _MOVEMENT_FINGERPRINT_FIELD: plan["fingerprint"],
+                _MOVEMENT_SOURCE_FIELD: source_download,
+            }, commit=False)
+            return {**plan, "state": "adopted"}
+        if plan["state"] != "create":
+            return plan
+        amount = _money(entry["amount"])
+        values = {
+            "doctype": "Bank Transaction",
+            "date": (entry.get("booking_date") or "")[:10],
+            "bank_account": plan["bank_account"],
+            "currency": statement["currency"],
+            "deposit": float(amount) if entry["credit_debit"] == "CRDT" else 0,
+            "withdrawal": float(amount) if entry["credit_debit"] == "DBIT" else 0,
+            "description": plan["description"],
+            "reference_number": plan["reference"],
+            "transaction_id": plan["reference"][:140],
+            "transaction_type": "EBICS",
+            _MOVEMENT_ID_FIELD: plan["identity"],
+            _MOVEMENT_FINGERPRINT_FIELD: plan["fingerprint"],
+            _MOVEMENT_SOURCE_FIELD: source_download,
+            **plan["party"],
+        }
+        transaction = frappe.get_doc(values).insert(ignore_permissions=True)
+        transaction.submit()
+        if (transaction.docstatus != 1
+                or not _movement_shape_matches(transaction, plan["bank_account"], statement, entry)
+                or transaction.get(_MOVEMENT_ID_FIELD) != plan["identity"]
+                or transaction.get(_MOVEMENT_FINGERPRINT_FIELD) != plan["fingerprint"]
+                or transaction.payment_entries):
+            raise BankFileError("Native Bank Transaction differs from the verified EBICS movement")
+        return {**plan, "state": "created", "bank_transaction": transaction.name}
+    except Exception:
+        frappe.db.rollback(save_point=savepoint)
+        raise
+
+
+def _mirror_bank_entry(connection, statement, entry, source_download, *, apply, planned=None):
+    plan = _movement_plan(connection, statement, entry)
+    if plan["state"] == "review":
+        return plan
+    if not apply:
+        if planned is not None:
+            previous = planned.get(plan["identity"])
+            if previous:
+                if previous["fingerprint"] != plan["fingerprint"]:
+                    return {**plan, "state": "review", "reason": "bank_identity_content_conflict"}
+                return {**plan, "state": "existing_in_plan"}
+            planned[plan["identity"]] = plan
+        return {**plan, "state": "would_" + plan["state"]}
+    return _apply_movement_plan(connection, statement, entry, source_download, plan)
+
+
+def _movement_map_row(record, statement, entry, result):
+    return {
+        "profile": record.profile,
+        "file_sha256": statement.get("file_sha256"),
+        "statement_id": statement.get("statement_id"),
+        "statement_index": statement.get("statement_index"),
+        "entry_index": entry.get("index"),
+        "entry_sha256": result.get("entry_sha256")
+            or sha256(entry["xml"].encode("utf-8")).hexdigest(),
+        "movement_id": result.get("identity"),
+        "bank_transaction": result.get("bank_transaction"),
+        "state": result["state"],
+        "reason": result.get("reason"),
+    }
+
+
+def _new_hashes_for_record(record, payload):
+    if record.new_file_hashes_json:
+        new_hashes = json.loads(record.new_file_hashes_json)
+        if (not isinstance(new_hashes, list) or any(not isinstance(item, str) for item in new_hashes)
+                or len(new_hashes) > 64):
+            raise BankFileError("EBICS new-file metadata is invalid")
+        return new_hashes
+    # Old receipts predate per-file metadata. The movement identity still
+    # protects replay; historical backfill first performs a read-only plan.
+    return list(dict.fromkeys(digest for _, digest in _receipt_files(payload).values()))
 
 
 def _reference_mentions(value, text):
@@ -670,35 +956,45 @@ def _process_download(connection, record):
     if record.ack_state != "Confirmed":
         raise BankFileError("Bank receipt must be confirmed before automatic booking")
     payload = _verify_receipt(record)
-    if record.new_file_hashes_json:
-        new_hashes = json.loads(record.new_file_hashes_json)
-        if (not isinstance(new_hashes, list) or any(not isinstance(item, str) for item in new_hashes)
-                or len(new_hashes) > 64):
-            raise BankFileError("EBICS new-file metadata is invalid")
-    else:
-        # Old receipts predate per-file metadata. They are only replayed after
-        # their durable bank receipt; the ledger reference guard still applies.
-        new_hashes = list(dict.fromkeys(digest for _, digest in _receipt_files(payload).values()))
+    new_hashes = _new_hashes_for_record(record, payload)
     if not new_hashes:
         record.db_set("processing_state", "Duplicate", commit=True)
         return {"booked": 0, "review": 0}
     preview = _preview(payload, connection, included_hashes=new_hashes, profile=record.profile)
     booked = review = 0
+    mirrored = set()
+    movement_map = []
     for statement in preview["statements"]:
         for entry in statement["entries"]:
+            movement_review = False
+            try:
+                movement = _mirror_bank_entry(connection, statement, entry, record.name, apply=True)
+            except Exception as error:
+                movement = {"state": "review", "reason": type(error).__name__}
+                frappe.log_error(title="EBICS movement requires review", message=type(error).__name__)
+            movement_map.append(_movement_map_row(record, statement, entry, movement))
+            if movement.get("bank_transaction"):
+                mirrored.add(movement["bank_transaction"])
+            if movement["state"] == "review":
+                review += 1
+                movement_review = True
             if not entry['issues'] and _already_booked_entry(connection, statement, entry):
                 continue
             try:
                 if _book_exact_match(connection, statement, entry, record.name):
                     booked += 1
-                else:
+                elif not movement_review:
                     review += 1
             except Exception as error:
                 # An isolated candidate is never allowed to book a difference or
                 # block archiving the other bank entries. It stays visible for review.
-                review += 1
+                if not movement_review:
+                    review += 1
                 frappe.log_error(title="EBICS candidate requires review", message=type(error).__name__)
     record.db_set({"booked_count": int(record.booked_count or 0) + booked, "review_count": review,
+                   "mirrored_count": len(mirrored),
+                   "movement_map_json": json.dumps(movement_map, ensure_ascii=False,
+                                                   sort_keys=True, separators=(",", ":")),
                    "processing_state": "Review" if review else "Completed"}, commit=True)
     return {"booked": booked, "review": review}
 
@@ -813,6 +1109,98 @@ def reconcile_historical_receipts(connection_name, apply=False):
         if apply is True:
             frappe.db.rollback()
         raise
+    finally:
+        lock.release()
+
+
+def _historical_movement_pass(connection, *, apply):
+    planned = {} if not apply else None
+    totals = {
+        "receipts_checked": 0, "entries_checked": 0, "created": 0,
+        "adopted": 0, "existing": 0, "review": 0,
+    }
+    reasons = {}
+    offset = 0
+    while offset < MAX_ARCHIVED_DOWNLOADS:
+        names = frappe.get_all("EBICS Download", filters={
+            "connection": connection.name,
+            "profile": ("in", sorted(MOVEMENT_PROFILES)),
+            "ack_state": "Confirmed",
+            "processing_state": ("!=", "Duplicate"),
+        }, pluck="name", order_by="creation asc, name asc",
+            limit_start=offset, limit_page_length=100)
+        for name in names:
+            record = frappe.get_doc("EBICS Download", name)
+            payload = _verify_receipt(record)
+            hashes = _new_hashes_for_record(record, payload)
+            preview = _preview(payload, connection, included_hashes=hashes, profile=record.profile)
+            movement_map = []
+            mirrored = set()
+            for statement in preview["statements"]:
+                for entry in statement["entries"]:
+                    result = _mirror_bank_entry(connection, statement, entry, record.name,
+                                                apply=apply, planned=planned)
+                    movement_map.append(_movement_map_row(record, statement, entry, result))
+                    totals["entries_checked"] += 1
+                    state = result["state"]
+                    if state in ("created", "would_create"):
+                        totals["created"] += 1
+                    elif state in ("adopted", "would_adopt"):
+                        totals["adopted"] += 1
+                    elif state in ("existing", "existing_in_plan", "would_existing"):
+                        totals["existing"] += 1
+                    elif state == "review":
+                        totals["review"] += 1
+                        reason = result.get("reason") or "unknown"
+                        reasons[reason] = reasons.get(reason, 0) + 1
+                    if result.get("bank_transaction"):
+                        mirrored.add(result["bank_transaction"])
+            if apply:
+                record.db_set({
+                    "mirrored_count": len(mirrored),
+                    "movement_map_json": json.dumps(movement_map, ensure_ascii=False,
+                                                    sort_keys=True, separators=(",", ":")),
+                }, commit=False)
+            totals["receipts_checked"] += 1
+        if len(names) < 100:
+            totals["review_reasons"] = reasons
+            return totals
+        offset += len(names)
+    raise BankFileError("EBICS archive exceeds safe movement-backfill limit")
+
+
+def mirror_historical_bank_movements(connection_name, apply=False):
+    """Plan first, then mirror verified archives without touching GL or payments.
+
+    The default is a bounded read-only dry run. An apply run is refused while
+    any entry lacks a safe bank identity, conflicts with a changed bank ID or
+    resembles an unadopted historical native Bank Transaction.
+    """
+    if type(apply) is not bool:
+        raise ValueError("apply must be a boolean")
+    frappe.only_for(("Accounts Manager", "System Manager"))
+    lock = frappe.cache().lock("ebics-download:" + connection_name, timeout=900,
+                               blocking_timeout=0)
+    if not lock.acquire(blocking=False):
+        return {"status": "already_running"}
+    try:
+        connection = frappe.get_doc("ebics Connection", connection_name)
+        connection.check_permission("read")
+        _accounts(connection)
+        plan = _historical_movement_pass(connection, apply=False)
+        if not apply:
+            return {"status": "dry_run", **plan}
+        if plan["review"]:
+            return {"status": "review_required", **plan}
+        try:
+            result = _historical_movement_pass(connection, apply=True)
+            if result["review"]:
+                raise BankFileError("The EBICS movement plan changed during backfill")
+            frappe.db.commit()
+            return {"status": "applied", **result}
+        except Exception:
+            frappe.db.rollback()
+            raise
     finally:
         lock.release()
 

@@ -57,6 +57,35 @@ abgesicherten Pfad. Legacy-Importer dürfen nicht direkt als Tagesjob laufen.
   Fehler bleiben zur Pruefung.
 - Es wird **kein** pain.001 versandt und kein Zahlungsvorschlag freigegeben.
 
+## Native Bankbewegungen und historische Übernahme
+
+Jeder sicher identifizierte, gebuchte `Ntry` eines bestätigten CHF- oder
+EUR-Auszugs wird zusätzlich als native `Bank Transaction` gespiegelt. Der
+Spiegel übernimmt Firmenbankkonto, Währung, Buchungsdatum und genau eine
+Einzahlungs- oder Auszahlungsseite. Er erzeugt weder `GL Entry` noch
+`Payment Entry` und setzt ohne native Zuordnung keinen künstlichen Status
+`Reconciled`.
+
+Die fachliche Identität stammt ausschliesslich aus einer eindeutigen
+bankseitigen Referenz. Bevorzugt werden ein einzelner UETR sowie die
+Account-Service-, Entry-, Transaktions- oder Zahlungsinformationsreferenz.
+Betrag, Datum oder Gegenpartei allein werden nie als Identität erfunden. Eine
+gleiche Bank-ID mit geändertem Betrag, Datum, Richtung oder Konto bleibt zur
+Prüfung. Dadurch überlappen camt.053 und camt.054 nicht doppelt, sofern sie die
+gleiche belastbare Bank-ID führen. Jede Quellposition wird im bestätigten
+`EBICS Download` mit Datei-, Statement-, Entry-Hash und nativer
+Bankbewegungsnummer protokolliert.
+
+Bestehende native Bankbewegungen werden nur übernommen, wenn Konto, Währung,
+Datum, Betrag, Richtung **und** Bankreferenz exakt stimmen. Eine nur ähnlich
+aussehende historische CHF-Zeile blockiert die automatische Übernahme, statt
+eine Dublette zu erzeugen. Die Funktion
+`mirror_historical_bank_movements(connection_name)` ist standardmässig ein
+reiner Dry-Run. `apply=True` wird vollständig verweigert, solange der Plan auch
+nur einen ungeklärten Eintrag enthält. Der anschliessende Apply-Lauf prüft alle
+Identitäten erneut und schreibt atomar; bei Fehler wird der gesamte Backfill
+zurückgerollt. Hauptbuch, Zahlungen und Bankprovider bleiben unverändert.
+
 ## Vertragliches Skonto und Wiederprüfung
 
 Für Ausgangsrechnungen wird Skonto nur erkannt, wenn die gesamte Rechnung
@@ -101,7 +130,7 @@ Hauptbuchzeilen und Wiederholbarkeit; sämtliche Testbuchungen werden zurückger
 ## Betrieb und Ruecknahme
 
 `EBICS Download` zeigt Empfangs-, Quittungs- und Buchungsstatus sowie die Anzahl
-automatischer Buchungen und Prueffaelle. Fehlerlogs enthalten nur Fehlertypen,
+nativer Bankbewegungen, automatischer Buchungen und Prueffaelle. Fehlerlogs enthalten nur Fehlertypen,
 keine Banknutzdaten. Bei Problemen zuerst `enable_sync=0` setzen. Archivierte
 Bankdaten und bereits gebuchte `Payment Entry` bleiben bestehen und duerfen
 nicht durch ein Code-Rollback automatisch geloescht oder storniert werden.

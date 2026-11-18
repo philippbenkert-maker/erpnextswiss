@@ -29,10 +29,10 @@ class FixtureExportTests(unittest.TestCase):
             fields.extend(json.loads(file.read_text(encoding="utf-8")))
         canonical = json.dumps(sorted(fields, key=lambda row: row["name"]),
                                sort_keys=True, separators=(",", ":"))
-        self.assertEqual(len(fields), 42)
-        # Semantic snapshot including the versioned Purchase Invoice IBAN field.
+        self.assertEqual(len(fields), 45)
+        # Semantic snapshot including supplier-payment and EBICS movement fields.
         self.assertEqual(hashlib.sha256(canonical.encode()).hexdigest(),
-                         "8752377e12227c31026f309e43ce4ec06b4c63c673243d7c84ebdda71f9607c1")
+                         "34bf0eaccb22af801d980f289e05b6874d2f1079d3e17c549780aca6722858f3")
 
     def test_native_export_filters_match_exact_files_and_isolate_optional_targets(self):
         tree = ast.parse((ROOT / "hooks.py").read_text(encoding="utf-8"))
@@ -59,4 +59,4 @@ class FixtureExportTests(unittest.TestCase):
             else:
                 self.assertNotIn("Expense Claim", {row["dt"] for row in rows})
         self.assertEqual(files, {file.name for file in (ROOT / "fixtures").glob("*.json")})
-        self.assertEqual(len(exported), 42)
+        self.assertEqual(len(exported), 45)
