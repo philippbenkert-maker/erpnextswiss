@@ -270,6 +270,9 @@ fixtures = [
             "Purchase Invoice-exported_to_abacus",
             "Payment Entry-exported_to_abacus",
             "Purchase Taxes and Charges Template-tax_code",
+            "Bank Transaction-custom_ebics_movement_id",
+            "Bank Transaction-custom_ebics_movement_fingerprint",
+            "Bank Transaction-custom_ebics_source_download",
         ]]],
     },
     {
