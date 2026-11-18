@@ -356,8 +356,8 @@ def _verified_bank_references(entry):
     return references - {None, '', 'NOTPROVIDED'}
 
 
-def _strict_invoice_candidate(connection, statement, entry):
-    """Return one live invoice only when bank, matcher and ledger all agree."""
+def _strict_invoice_candidates(connection, statement, entry):
+    """Return fully referenced live invoices only when bank, matcher and ledger agree."""
     if (statement["balance_check"] != "matched" or entry["issues"]
             or entry["detail_count"] > 1 or len(entry["candidates"]) != 1):
         return None
@@ -377,26 +377,50 @@ def _strict_invoice_candidate(connection, statement, entry):
     if direction not in ("CRDT", "DBIT") or candidate.get("expense_matches"):
         return None
     names = candidate.get("invoice_matches")
-    if not isinstance(names, list) or len(names) != 1 or not isinstance(names[0], str):
+    if (not isinstance(names, list) or not 1 <= len(names) <= 20
+            or any(not isinstance(name, str) or not name for name in names)
+            or len(set(names)) != len(names)):
         return None
     doctype = "Sales Invoice" if direction == "CRDT" else "Purchase Invoice"
-    invoice = frappe.get_doc(doctype, names[0])
     party_field = "customer" if direction == "CRDT" else "supplier"
-    if (invoice.docstatus != 1 or invoice.company != connection.company
-            or invoice.get(party_field) != candidate.get("party_match")
-            or _money(invoice.outstanding_amount) != _money(candidate.get('matched_amount'))
-            or _contract_discount(invoice, amount, candidate['date']) is None
-            or invoice.currency != statement["currency"]):
-        return None
     reference_text = candidate.get("transaction_reference") or ""
-    accepted = {str(invoice.name)}
-    accepted.update(str(value) for value in (invoice.get("bill_no"), invoice.get("esr_reference"),
-                                             invoice.get("esr_reference_number"),
-                                             invoice.get("reference_number_full"))
-                    if value and len(str(value)) >= 6)
-    if not any(_reference_mentions(value, reference_text) for value in accepted):
+    invoices = []
+    outstanding_total = Decimal("0.00")
+    for name in names:
+        invoice = frappe.get_doc(doctype, name)
+        outstanding = _money(invoice.outstanding_amount)
+        if (invoice.docstatus != 1 or invoice.company != connection.company
+                or invoice.get(party_field) != candidate.get("party_match")
+                or invoice.currency != statement["currency"] or outstanding is None):
+            return None
+        accepted = {str(invoice.name)}
+        accepted.update(str(value) for value in (invoice.get("bill_no"), invoice.get("esr_reference"),
+                                                 invoice.get("esr_reference_number"),
+                                                 invoice.get("reference_number_full"))
+                        if value and len(str(value)) >= 6)
+        if not any(_reference_mentions(value, reference_text) for value in accepted):
+            return None
+        outstanding_total += outstanding
+        invoices.append(invoice)
+    if outstanding_total != _money(candidate.get("matched_amount")):
         return None
-    return candidate, doctype, invoice, amount
+    if len(invoices) == 1:
+        if _contract_discount(invoices[0], amount, candidate["date"]) is None:
+            return None
+    elif amount != outstanding_total:
+        # Multi-invoice payments never infer discounts, partial allocations or
+        # rounding differences. The bank amount must equal the exact open sum.
+        return None
+    return candidate, doctype, invoices, amount
+
+
+def _strict_invoice_candidate(connection, statement, entry):
+    """Backward-compatible single-invoice matcher used by probes and tests."""
+    matched = _strict_invoice_candidates(connection, statement, entry)
+    if matched is None or len(matched[2]) != 1:
+        return None
+    candidate, doctype, invoices, amount = matched
+    return candidate, doctype, invoices[0], amount
 
 
 def _discount_payment(invoice, doctype, candidate, statement, amount, download_name):
@@ -528,6 +552,7 @@ def _cross_export_payment_matches(connection, statement, entry, amount, incoming
             continue
         payment = frappe.get_doc('Payment Entry', row['name'])
         references = payment.get('references') or []
+        allocated = [_money(reference.get('allocated_amount')) for reference in references]
         if (payment.docstatus != 1 or payment.company != connection.company
                 or payment.payment_type != payment_type
                 or payment.get(bank_field) != statement['account']
@@ -535,17 +560,22 @@ def _cross_export_payment_matches(connection, statement, entry, amount, incoming
                 or not _cash_shape_matches(payment, amount, statement['currency'])
                 or payment.party_type != party_type or payment.party != candidate['party_match']
                 or not _remarks_mention_ebanking_id(payment.get('remarks'), identity)
-                or len(references) != 1
-                or references[0].get('reference_doctype') != expected_doctype
-                or _money(references[0].get('allocated_amount')) != amount):
+                or not 1 <= len(references) <= 20
+                or any(reference.get('reference_doctype') != expected_doctype
+                       for reference in references)
+                or any(value is None for value in allocated)
+                or sum(allocated) != amount):
             continue
-        invoice = frappe.get_doc(expected_doctype, references[0].get('reference_name'))
         party_field = 'customer' if incoming else 'supplier'
-        if (invoice.docstatus != 1 or invoice.company != connection.company
-                or invoice.get(party_field) != candidate['party_match']
-                or invoice.currency != statement['currency']
-                or not _zero_money(invoice.outstanding_amount)
-                or not _invoice_reference_matches(invoice, candidate['transaction_reference'])):
+        invoices = [frappe.get_doc(expected_doctype, reference.get('reference_name'))
+                    for reference in references]
+        if (len({invoice.name for invoice in invoices}) != len(invoices)
+                or any(invoice.docstatus != 1 or invoice.company != connection.company
+                       or invoice.get(party_field) != candidate['party_match']
+                       or invoice.currency != statement['currency']
+                       or not _zero_money(invoice.outstanding_amount)
+                       or not _invoice_reference_matches(invoice, candidate['transaction_reference'])
+                       for invoice in invoices)):
             continue
         proven.append(payment.name)
     return len(proven) == 1
@@ -574,10 +604,10 @@ def _already_booked_entry(connection, statement, entry):
 
 
 def _book_exact_match(connection, statement, entry, download_name):
-    matched = _strict_invoice_candidate(connection, statement, entry)
+    matched = _strict_invoice_candidates(connection, statement, entry)
     if matched is None:
         return False
-    candidate, doctype, invoice, amount = matched
+    candidate, doctype, invoices, amount = matched
     reference = candidate["unique_reference"]
     if frappe.db.exists("Payment Entry", {"company": connection.company, "reference_no": reference,
                                            "docstatus": ("<", 2)}):
@@ -592,7 +622,7 @@ def _book_exact_match(connection, statement, entry, download_name):
         "paid_from": defaults.get("receivable_account") if incoming else statement["account"],
         "paid_to": statement["account"] if incoming else defaults.get("payable_account"),
         "type": "Receive" if incoming else "Pay", "party_type": "Customer" if incoming else "Supplier",
-        "party": candidate["party_match"], "references": repr([invoice.name]),
+        "party": candidate["party_match"], "references": repr([invoice.name for invoice in invoices]),
         "remarks": "EBICS {0}; {1}".format(download_name, candidate.get("transaction_reference") or ""),
         "auto_submit": False, "party_iban": candidate.get("party_iban"),
         "company": connection.company,
@@ -600,24 +630,33 @@ def _book_exact_match(connection, statement, entry, download_name):
     savepoint = "ebics_booking_" + sha256(reference.encode()).hexdigest()[:20]
     frappe.db.savepoint(savepoint)
     try:
-        discount = _contract_discount(invoice, amount, candidate['date'])
+        invoice = invoices[0]
+        discount = _contract_discount(invoice, amount, candidate['date']) if len(invoices) == 1 else Decimal('0.00')
         if discount:
             payment = _discount_payment(invoice, doctype, candidate, statement, amount, download_name)
         else:
             result = make_payment_entry(**payload)
             payment = frappe.get_doc("Payment Entry", result["payment_entry"])
         references = payment.references or []
+        expected_allocations = {
+            invoice.name: _money(invoice.outstanding_amount)
+            for invoice in invoices
+        }
+        actual_allocations = {
+            reference.reference_name: _money(reference.allocated_amount)
+            for reference in references
+            if reference.reference_doctype == doctype
+        }
         if (payment.docstatus != 0 or payment.company != connection.company
                 or payment.party != candidate["party_match"]
                 or _money(payment.paid_amount) != amount
                 or _money(payment.received_amount) != amount
                 or Decimal(str(payment.difference_amount or 0)) != 0
                 or Decimal(str(payment.unallocated_amount or 0)) != 0
-                or (not discount and payment.deductions) or len(references) != 1
+                or (not discount and payment.deductions) or len(references) != len(invoices)
                 or (discount and sum(Decimal(str(d.amount)) for d in payment.deductions) != discount)
-                or references[0].reference_doctype != doctype
-                or references[0].reference_name != invoice.name
-                or _money(references[0].allocated_amount) != amount + discount):
+                or len(actual_allocations) != len(invoices)
+                or actual_allocations != expected_allocations):
             raise BankFileError("Candidate payment differs from the confirmed bank and invoice amount")
         payment.submit()
         frappe.db.commit()

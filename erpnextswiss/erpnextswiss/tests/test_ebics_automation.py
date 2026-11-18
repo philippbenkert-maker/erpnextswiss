@@ -103,6 +103,29 @@ class TestEbicsAutomation(TestCase):
         self.assertEqual(accepted[1], "Sales Invoice")
         self.assertEqual(accepted[2].name, "SINV-1")
 
+    def test_exact_match_accepts_explicit_multi_invoice_payment(self):
+        statement, entry = self._multi_invoice_candidate()
+        connection = MagicMock(company="KT Wärmesysteme AG")
+        invoices = self._multi_invoices()
+        with patch.object(automation.frappe, "get_doc", side_effect=invoices):
+            accepted = automation._strict_invoice_candidates(connection, statement, entry)
+        self.assertEqual(accepted[1], "Purchase Invoice")
+        self.assertEqual([invoice.name for invoice in accepted[2]],
+                         ["ACC-PINV-2026-00084", "ACC-PINV-2026-00085"])
+        self.assertEqual(accepted[3], Decimal("551.80"))
+
+    def test_multi_invoice_match_requires_every_reference_and_exact_sum(self):
+        statement, entry = self._multi_invoice_candidate()
+        connection = MagicMock(company="KT Wärmesysteme AG")
+        entry["candidates"][0]["transaction_reference"] = "26-395-000083"
+        with patch.object(automation.frappe, "get_doc", side_effect=self._multi_invoices()):
+            self.assertIsNone(automation._strict_invoice_candidates(connection, statement, entry))
+
+        statement, entry = self._multi_invoice_candidate()
+        entry["amount"] = entry["candidates"][0]["amount"] = 551.79
+        with patch.object(automation.frappe, "get_doc", side_effect=self._multi_invoices()):
+            self.assertIsNone(automation._strict_invoice_candidates(connection, statement, entry))
+
     def test_auto_booking_never_submits_a_difference(self):
         statement, entry = self._candidate()
         statement["account"] = "AKB bank account"
@@ -160,6 +183,41 @@ class TestEbicsAutomation(TestCase):
             self.assertTrue(automation._book_exact_match(connection, statement, entry, "EBICS-1"))
         self.assertFalse(make_payment.call_args.kwargs["auto_submit"])
         self.assertEqual(make_payment.call_args.kwargs["paid_to"], "AKB bank account")
+        payment.submit.assert_called_once()
+        commit.assert_called_once()
+
+    def test_auto_booking_submits_one_payment_for_two_exact_invoices(self):
+        statement, entry = self._multi_invoice_candidate()
+        statement["account"] = "AKB EUR bank account"
+        connection = MagicMock(company="KT Wärmesysteme AG")
+        invoices = self._multi_invoices()
+        payment = MagicMock()
+        payment.docstatus = 0
+        payment.company = connection.company
+        payment.party = "Kronoterm d.o.o."
+        payment.paid_amount = 551.80
+        payment.received_amount = 551.80
+        payment.difference_amount = 0
+        payment.unallocated_amount = 0
+        payment.deductions = []
+        payment.references = [
+            frappe._dict(reference_doctype="Purchase Invoice",
+                         reference_name="ACC-PINV-2026-00084", allocated_amount=254),
+            frappe._dict(reference_doctype="Purchase Invoice",
+                         reference_name="ACC-PINV-2026-00085", allocated_amount=297.80),
+        ]
+        with (patch.object(automation.frappe, "get_doc", side_effect=[*invoices, payment]),
+              patch.object(automation.frappe.db, "exists", return_value=False),
+              patch.object(automation.frappe.db, "savepoint"),
+              patch.object(automation.frappe.db, "commit") as commit,
+              patch("erpnextswiss.erpnextswiss.page.bank_wizard.bank_wizard.get_default_accounts",
+                    return_value={"payable_account": "AP"}),
+              patch("erpnextswiss.erpnextswiss.page.bank_wizard.bank_wizard.make_payment_entry",
+                    return_value={"payment_entry": "ACC-PAY-2026-00084"}) as make_payment):
+            self.assertTrue(automation._book_exact_match(connection, statement, entry, "EBICS-1"))
+        self.assertEqual(make_payment.call_args.kwargs["paid_from"], "AKB EUR bank account")
+        self.assertEqual(make_payment.call_args.kwargs["references"],
+                         repr(["ACC-PINV-2026-00084", "ACC-PINV-2026-00085"]))
         payment.submit.assert_called_once()
         commit.assert_called_once()
 
@@ -777,6 +835,37 @@ class TestEbicsAutomation(TestCase):
                     self.assertTrue(automation._already_booked_entry(
                         MagicMock(company='KT Wärmesysteme AG'), statement, entry))
 
+    def test_cross_export_reference_resolves_one_paid_multi_invoice_payment(self):
+        statement, entry = self._multi_invoice_candidate()
+        statement.update(account="AKB EUR bank account", iban="CH1")
+        entry.update(reference="O/1597514938", bank_detail_references=[])
+        entry["candidates"][0].update(unique_reference="O/1597514938-1")
+        row = frappe._dict(
+            name="ACC-PAY-2026-00084", paid_amount=551.80, received_amount=551.80,
+            paid_from_account_currency="EUR", paid_to_account_currency="EUR",
+            party_type="Supplier", party="Kronoterm d.o.o.",
+            remarks="Zahlung via E-Banking 1597514938; 26-395-000083 26-395-000094")
+        payment = frappe._dict(row)
+        payment.update(docstatus=1, company="KT Wärmesysteme AG", payment_type="Pay",
+                       paid_from="AKB EUR bank account", posting_date="2026-11-17",
+                       references=[
+                           frappe._dict(reference_doctype="Purchase Invoice",
+                                        reference_name="ACC-PINV-2026-00084", allocated_amount=254),
+                           frappe._dict(reference_doctype="Purchase Invoice",
+                                        reference_name="ACC-PINV-2026-00085", allocated_amount=297.80),
+                       ])
+        invoices = self._multi_invoices(outstanding=0)
+
+        def get_doc(doctype, name):
+            if doctype == "Payment Entry":
+                return payment
+            return invoices[0] if name == invoices[0].name else invoices[1]
+
+        with (patch.object(automation.frappe, "get_all", side_effect=[[], [row]]),
+              patch.object(automation.frappe, "get_doc", side_effect=get_doc)):
+            self.assertTrue(automation._already_booked_entry(
+                MagicMock(company="KT Wärmesysteme AG"), statement, entry))
+
     def test_cross_export_match_fails_closed_without_labelled_identity_or_paid_invoice(self):
         statement = {'account': 'BANK', 'currency': 'CHF', 'iban': 'CH1'}
         entry = {
@@ -836,3 +925,35 @@ class TestEbicsAutomation(TestCase):
                             customer="CUST-1", outstanding_amount=100, currency="CHF",
                             bill_no=None, esr_reference=None, esr_reference_number=None,
                             reference_number_full=None)
+
+    @staticmethod
+    def _multi_invoice_candidate():
+        candidate = {
+            "amount": 551.80, "matched_amount": 551.80, "currency": "EUR",
+            "credit_debit": "DBIT", "date": "2026-11-17", "unique_reference": "BANK-REF-2",
+            "invoice_matches": ["ACC-PINV-2026-00084", "ACC-PINV-2026-00085"],
+            "party_match": "Kronoterm d.o.o.",
+            "transaction_reference": "26-395-000083 / 26-395-000094",
+        }
+        statement = {"balance_check": "matched", "currency": "EUR"}
+        entry = {
+            "issues": [], "detail_count": 1, "candidates": [candidate], "amount": "551.80",
+            "credit_debit": "DBIT", "booking_date": "2026-11-17", "reference": "BANK-REF-2",
+            "entry_reference": None,
+        }
+        return statement, entry
+
+    @staticmethod
+    def _multi_invoices(outstanding=None):
+        first = 254 if outstanding is None else outstanding
+        second = 297.80 if outstanding is None else outstanding
+        return [
+            frappe._dict(name="ACC-PINV-2026-00084", docstatus=1,
+                         company="KT Wärmesysteme AG", supplier="Kronoterm d.o.o.",
+                         outstanding_amount=first, currency="EUR", bill_no="26-395-000083",
+                         esr_reference=None, esr_reference_number=None, reference_number_full=None),
+            frappe._dict(name="ACC-PINV-2026-00085", docstatus=1,
+                         company="KT Wärmesysteme AG", supplier="Kronoterm d.o.o.",
+                         outstanding_amount=second, currency="EUR", bill_no="26-395-000094",
+                         esr_reference=None, esr_reference_number=None, reference_number_full=None),
+        ]

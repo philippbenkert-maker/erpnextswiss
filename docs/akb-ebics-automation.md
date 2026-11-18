@@ -43,15 +43,18 @@ abgesicherten Pfad. Legacy-Importer dürfen nicht direkt als Tagesjob laufen.
   und die explizit gebundenen Konten geprueft. Ungueltige oder uebergrosse
   Dateien werden nicht positiv quittiert.
 - Eine Zahlung wird nur fuer einen einzelnen, gebuchten, nicht stornierten
-  Bankeintrag mit stimmiger Auszugsbilanz, einem Kandidaten, einer eingereichten
-  Rechnung derselben Firma/Partei/Waehrung und exakt gleichem offenen Betrag
-  gebucht, oder mit dem unten beschriebenen vertraglichen Skonto.
-  Die Bankreferenz und Rechnungsreferenz muessen nachweisbar passen.
+  Bankeintrag mit stimmiger Auszugsbilanz und genau einem Kandidaten gebucht.
+  Dieser Kandidat darf eine oder mehrere eingereichte Rechnungen derselben
+  Firma, Partei und Waehrung enthalten. Jede Rechnungsreferenz muss im
+  Banktext nachweisbar genannt sein und die Summe aller offenen Betraege muss
+  dem Bankbetrag exakt entsprechen. Nur bei genau einer Ausgangsrechnung ist
+  alternativ das unten beschriebene vertragliche Skonto zulaessig.
   Einzeltransaktionsreferenzen aus validiertem XML und die dokumentierte
   Gruppenreferenz mit Suffix `-1` werden bei genau einer Einzelposition erkannt.
   Eine Kontonummer allein ist keine eindeutige Zahlungsreferenz.
-  Es gibt keinen pauschalen Kurs-/Rundungs-Differenzausgleich. Sammelbuchungen,
-  Spesen, Lohn, mehrdeutige Treffer und alle Fehler bleiben zur Pruefung.
+  Es gibt keinen pauschalen Kurs-/Rundungs-Differenzausgleich. Nicht vollstaendig
+  referenzierte Sammelbuchungen, Spesen, Lohn, mehrdeutige Treffer und alle
+  Fehler bleiben zur Pruefung.
 - Es wird **kein** pain.001 versandt und kein Zahlungsvorschlag freigegeben.
 
 ## Vertragliches Skonto und Wiederprüfung
@@ -82,9 +85,11 @@ Entwurf genügt nicht. Falls ein früherer Kontoauszug und der aktuelle
 EBICS-Abruf unterschiedliche Referenzen liefern, wird zusätzlich die aus dem
 validierten `O/...`-Feld gewonnene E-Banking-Nummer mit der ausdrücklich als
 `E-Banking` bezeichneten Nummer in den Zahlungsbemerkungen abgeglichen. Dafür
-müssen genau ein Empfänger, genau eine eingereichte Zahlung und genau eine
-vollständig ausgeglichene Rechnung derselben Firma, Partei und Währung
-nachgewiesen sein. Die Rechnungsreferenz muss auch im aktuellen Banktext stehen.
+müssen genau ein Empfänger und genau eine eingereichte Zahlung nachgewiesen
+sein. Deren eine oder mehrere vollständig ausgeglichene Rechnungen müssen
+derselben Firma, Partei und Währung angehören. Jede Rechnungsreferenz muss auch
+im aktuellen Banktext stehen; die Summe der Zuordnungen muss dem Bankbetrag
+exakt entsprechen.
 Mehrdeutige oder nur ähnlich aussehende Bewegungen bleiben zur Prüfung.
 Buchungszähler bleiben bei Wiederholung kumulativ erhalten.
 
