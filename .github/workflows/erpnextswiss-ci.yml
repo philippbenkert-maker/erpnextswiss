@@ -239,6 +239,7 @@ jobs:
       - name: Compare native Workspace rendering through old and direct URLs
         working-directory: frappe-bench
         run: |
+          git -C apps/frappe rev-parse HEAD
           bench build --app erpnextswiss
           npm ci --ignore-scripts --prefix apps/erpnextswiss/tests/browser
           node --test apps/erpnextswiss/tests/browser/compare-screenshots.test.cjs

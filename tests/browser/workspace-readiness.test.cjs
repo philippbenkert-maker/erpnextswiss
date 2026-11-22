@@ -44,7 +44,7 @@ async function fixture(t, shortcuts) {
 
 const counted = label => ({ label, type: "DocType", doc_view: "List", link_to: label });
 
-test("awaits every delayed count and accepts the rendered zero", async t => {
+test("awaits every delayed count without requiring an editor and accepts zero", async t => {
     const page = await fixture(t, [counted("Invoices"), counted("Proposals")]);
     assert.equal(await page.evaluate(workspaceShortcutsReady, "Payments"), false);
     await page.evaluate(() => {
@@ -101,4 +101,9 @@ test("only configured blocks with native permitted data need to render", async t
         frappe.workspace.content.push({ type: "header", data: { text: "Overview" } });
     });
     assert.equal(await page.evaluate(workspaceShortcutsReady, "Payments"), true);
+});
+
+test("a named workspace with layout chrome and no shortcut data is not ready", async t => {
+    const page = await fixture(t, []);
+    assert.equal(await page.evaluate(workspaceShortcutsReady, "Payments"), false);
 });

@@ -22,15 +22,9 @@ async function inspect(page, route, workspace, name, warm = false) {
     } else {
         await page.goto(base + "/desk/" + route, { waitUntil: "domcontentloaded" });
     }
-    await page.waitForFunction(target => window.frappe?.workspace?._page?.name === target
-        && frappe.workspace.editor, workspace, { timeout: 45000 });
-    await page.evaluate(async () => {
-        await frappe.workspace.editor.isReady;
-        await document.fonts.ready;
-    });
-    const panel = page.locator("#page-Workspaces .layout-main-section");
-    await panel.locator(".ce-block").first().waitFor();
     await page.waitForFunction(workspaceShortcutsReady, workspace, { timeout: 45000 });
+    await page.evaluate(() => document.fonts.ready);
+    const panel = page.locator("#page-Workspaces .layout-main-section");
     await page.mouse.move(0, 0);
     const snapshot = await panel.evaluate(element => ({
         text: element.innerText,
@@ -62,13 +56,13 @@ async function main() {
         for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
             const context = await browser.newContext({ viewport, reducedMotion: "reduce" });
             let page;
+            const errors = [];
             try {
                 const response = await context.request.post(base + "/api/method/login", {
                     form: { usr: "Administrator", pwd: "admin" }
                 });
                 assert.ok(response.ok(), "Synthetic CI site login must succeed");
                 page = await context.newPage();
-                const errors = [];
                 page.on("pageerror", error => errors.push(error.message));
                 for (const [alias, workspace] of Object.entries(routes)) {
                     const label = viewport.width + "-" + alias;
@@ -94,9 +88,26 @@ async function main() {
                 if (page && !page.isClosed()) {
                     await page.screenshot({ path: path.join(output, viewport.width + "-failure.png"), fullPage: true });
                     fs.writeFileSync(path.join(output, viewport.width + "-failure.json"), JSON.stringify({
-                        url: page.url(), error: String(error),
-                        state: await page.evaluate(() => ({ route: frappe.get_route(),
-                            workspace: frappe.workspace?._page?.name }))
+                        path: new URL(page.url()).pathname,
+                        error: error.name,
+                        pageErrors: errors.length,
+                        state: await page.evaluate(() => {
+                            const workspace = window.frappe?.workspace;
+                            const panel = document.querySelector("#page-Workspaces .layout-main-section");
+                            const shortcuts = workspace?.page_data?.shortcuts?.items;
+                            const content = workspace?.content;
+                            return {
+                                route: window.frappe?.get_route?.(),
+                                workspace: workspace?._page?.name,
+                                editorAttached: Boolean(workspace?.editor),
+                                panelPresent: Boolean(panel),
+                                contentBlocks: Array.isArray(content) ? content.length : null,
+                                shortcutRecords: Array.isArray(shortcuts) ? shortcuts.length : null,
+                                renderedBlocks: panel?.querySelectorAll(".ce-block").length ?? null,
+                                renderedShortcuts: panel?.querySelectorAll(".ce-block [shortcut_name]").length ?? null,
+                                renderedCounters: panel?.querySelectorAll(".indicator-pill").length ?? null
+                            };
+                        })
                     }, null, 2));
                 }
                 throw error;

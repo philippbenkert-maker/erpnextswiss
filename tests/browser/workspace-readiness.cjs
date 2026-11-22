@@ -1,5 +1,5 @@
-// Frappe's EditorJS readiness does not await ShortcutWidget.set_actions() counts.
-// This runs in the browser against the native workspace data and rendered blocks.
+// Readiness comes from the rendered shortcuts and their asynchronous counts.
+// The editor may not be attached while a workspace is being viewed.
 function workspaceShortcutsReady(target) {
     const workspace = window.frappe?.workspace;
     const panel = document.querySelector("#page-Workspaces .layout-main-section");
@@ -14,7 +14,7 @@ function workspaceShortcutsReady(target) {
             data: shortcuts.find(item => unescape(item.label) === unescape(__(block.data.shortcut_name))) }))
         .filter(item => item.data);
     const rendered = Array.from(panel.querySelectorAll(".ce-block [shortcut_name]"));
-    if (rendered.length !== expected.length) return false;
+    if (!expected.length || rendered.length !== expected.length) return false;
 
     return expected.every(({ name, data }) => {
         const matches = rendered.filter(block => block.getAttribute("shortcut_name") === name);
