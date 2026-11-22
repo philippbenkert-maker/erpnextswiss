@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 import frappe
@@ -58,7 +59,8 @@ class TestWorkspaceRoutesNative(unittest.TestCase):
             self.assertTrue(frappe.db.exists("DocType", target), target)
 
         for _ in range(2):
-            ensure_v16_desk_records()
+            with patch.dict(frappe.flags, {"in_migrate": True}):
+                ensure_v16_desk_records()
             sidebar = frappe.get_doc("Workspace Sidebar", "Schweizer Buchhaltung")
             sidebar_links = {
                 item.label: item.link_to for item in sidebar.items
@@ -107,8 +109,11 @@ class TestWorkspaceRoutesNative(unittest.TestCase):
         self.assertEqual(frappe.db.get_value("Custom Role", custom_role.name, "page"), retired_route_page_name(legacy))
         self.assertEqual(frappe.db.get_value("File", file.name, "attached_to_name"), retired_route_page_name(legacy))
         self.assertEqual(frappe.db.get_value("Has Role", extra_role.name, "parent"), retired_route_page_name(legacy))
-        ensure_v16_desk_records()
-        ensure_v16_desk_records()
+        # Match the actual after_migrate entry point. v16 keeps legacy sidebars
+        # read-only outside this lifecycle. The native validator still runs.
+        with patch.dict(frappe.flags, {"in_migrate": True}):
+            ensure_v16_desk_records()
+            ensure_v16_desk_records()
         self.assertEqual(before, {name: frappe.get_doc("Workspace", name).content for name in before})
         self.assertEqual(retire_workspace_route_pages(), [])
 

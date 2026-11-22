@@ -217,13 +217,9 @@ jobs:
         run: |
           bench --site "$TEST_SITE" install-app erpnextswiss
 
-      - name: Verify native workspace route upgrade and retained history
+      - name: Verify native bank file matching and replay
         working-directory: frappe-bench
-        run: bench --site "$TEST_SITE" run-tests --module erpnextswiss.erpnextswiss.tests.test_workspace_routes_native
-
-      - name: Run ERPNextSwiss tests
-        working-directory: frappe-bench
-        run: bench --site "$TEST_SITE" run-tests --app erpnextswiss
+        run: bench --site "$TEST_SITE" run-tests --module erpnextswiss.erpnextswiss.tests.test_bank_file_handover_native
 
       - name: Build offline gateway for native ERP handover acceptance
         run: docker build --target test -t kt-bank-gateway-test gateway/ebics
@@ -231,6 +227,14 @@ jobs:
       - name: Verify bank handover across commits and independent receivers
         working-directory: frappe-bench
         run: ./env/bin/python -m erpnextswiss.erpnextswiss.tests.bank_handover_process_acceptance
+
+      - name: Verify native workspace route upgrade and retained history
+        working-directory: frappe-bench
+        run: bench --site "$TEST_SITE" run-tests --module erpnextswiss.erpnextswiss.tests.test_workspace_routes_native
+
+      - name: Run ERPNextSwiss tests
+        working-directory: frappe-bench
+        run: bench --site "$TEST_SITE" run-tests --app erpnextswiss
 
       - name: Compare native Workspace rendering through old and direct URLs
         working-directory: frappe-bench
