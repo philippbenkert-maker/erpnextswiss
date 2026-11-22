@@ -1,31 +1,22 @@
-// Readiness comes from the rendered shortcuts and their asynchronous counts.
-// The editor may not be attached while a workspace is being viewed.
+// Frappe can finish a shortcut count without rendering a badge, as it does for zero.
 function workspaceShortcutsReady(target) {
-    const workspace = window.frappe?.workspace;
+    const app = window.frappe;
+    const workspace = app?.workspace;
     const panel = document.querySelector("#page-Workspaces .layout-main-section");
     const shortcuts = workspace?.page_data?.shortcuts?.items;
-    const singleTypes = window.frappe?.boot?.single_types;
     if (workspace?._page?.name !== target || !panel || !Array.isArray(shortcuts)
-        || !Array.isArray(workspace.content) || !Array.isArray(singleTypes)) return false;
+        || !Array.isArray(workspace.content) || app.request?.ajax_count !== 0) return false;
 
-    const unescape = value => frappe.utils.unescape_html(value);
+    const unescape = value => app.utils.unescape_html(value);
     const expected = workspace.content.filter(block => block.type === "shortcut")
-        .map(block => ({ name: block.data.shortcut_name,
-            data: shortcuts.find(item => unescape(item.label) === unescape(__(block.data.shortcut_name))) }))
-        .filter(item => item.data);
+        .map(block => block.data.shortcut_name)
+        .filter(name => shortcuts.some(item => unescape(item.label) === unescape(__(name))));
     const rendered = Array.from(panel.querySelectorAll(".ce-block [shortcut_name]"));
     if (!expected.length || rendered.length !== expected.length) return false;
 
-    return expected.every(({ name, data }) => {
+    return expected.every(name => {
         const matches = rendered.filter(block => block.getAttribute("shortcut_name") === name);
-        if (matches.length !== 1) return false;
-        const widget = matches[0].querySelector(".shortcut-widget-box");
-        if (!widget) return false;
-        const needsCount = data.type === "DocType" && data.doc_view !== "New"
-            && !singleTypes.includes(data.link_to);
-        if (!needsCount) return true;
-        const count = widget.querySelector(".indicator-pill");
-        return Boolean(count && count.textContent.trim() !== "");
+        return matches.length === 1 && Boolean(matches[0].querySelector(".shortcut-widget-box"));
     });
 }
 

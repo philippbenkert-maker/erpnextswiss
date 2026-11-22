@@ -23,7 +23,11 @@ async function inspect(page, route, workspace, name, warm = false) {
         await page.goto(base + "/desk/" + route, { waitUntil: "domcontentloaded" });
     }
     await page.waitForFunction(workspaceShortcutsReady, workspace, { timeout: 45000 });
-    await page.evaluate(() => document.fonts.ready);
+    await page.evaluate(async () => {
+        await document.fonts.ready;
+        // The count promise can schedule a widget update as the request finishes.
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
     const panel = page.locator("#page-Workspaces .layout-main-section");
     await page.mouse.move(0, 0);
     const snapshot = await panel.evaluate(element => ({
@@ -63,7 +67,12 @@ async function main() {
                 });
                 assert.ok(response.ok(), "Synthetic CI site login must succeed");
                 page = await context.newPage();
-                page.on("pageerror", error => errors.push(error.message));
+                page.on("pageerror", error => errors.push(error.name));
+                const countFailures = [];
+                page.on("response", response => {
+                    if (new URL(response.url()).pathname === "/api/method/frappe.desk.reportview.get_count"
+                        && !response.ok()) countFailures.push(response.status());
+                });
                 for (const [alias, workspace] of Object.entries(routes)) {
                     const label = viewport.width + "-" + alias;
                     const canonicalRoute = workspace.toLowerCase().replace(/ /g, "-");
@@ -84,6 +93,7 @@ async function main() {
                         repeatedVisits: 2, coldViewportIdentical: true, warmComparisons, result: "pass" });
                 }
                 assert.deepEqual(errors, [], "Navigation must not cause uncaught JavaScript errors");
+                assert.deepEqual(countFailures, [], "Workspace count requests must succeed");
             } catch (error) {
                 if (page && !page.isClosed()) {
                     await page.screenshot({ path: path.join(output, viewport.width + "-failure.png"), fullPage: true });
@@ -105,7 +115,7 @@ async function main() {
                                 shortcutRecords: Array.isArray(shortcuts) ? shortcuts.length : null,
                                 renderedBlocks: panel?.querySelectorAll(".ce-block").length ?? null,
                                 renderedShortcuts: panel?.querySelectorAll(".ce-block [shortcut_name]").length ?? null,
-                                renderedCounters: panel?.querySelectorAll(".indicator-pill").length ?? null
+                                pendingAjax: window.frappe?.request?.ajax_count ?? null
                             };
                         })
                     }, null, 2));

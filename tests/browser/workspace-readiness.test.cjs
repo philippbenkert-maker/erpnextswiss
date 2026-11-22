@@ -14,7 +14,7 @@ async function fixture(t, shortcuts) {
     await page.evaluate(items => {
         window.__ = value => value;
         window.frappe = {
-            boot: { single_types: ["Bank Settings"] },
+            request: { ajax_count: 0 },
             utils: { unescape_html: value => {
                 const decoder = document.createElement("textarea");
                 decoder.innerHTML = value;
@@ -44,29 +44,32 @@ async function fixture(t, shortcuts) {
 
 const counted = label => ({ label, type: "DocType", doc_view: "List", link_to: label });
 
-test("awaits every delayed count without requiring an editor and accepts zero", async t => {
+test("waits for requests to finish and accepts native zero-count shortcuts with no badge", async t => {
     const page = await fixture(t, [counted("Invoices"), counted("Proposals")]);
+    await page.evaluate(() => {
+        frappe.request.ajax_count = 2;
+    });
     assert.equal(await page.evaluate(workspaceShortcutsReady, "Payments"), false);
     await page.evaluate(() => {
-        const widgets = document.querySelectorAll(".shortcut-widget-box");
-        widgets[0].innerHTML = '<div class="indicator-pill">0</div>';
+        frappe.request.ajax_count = 1; // The zero result leaves its shortcut without a badge.
     });
     assert.equal(await page.evaluate(workspaceShortcutsReady, "Payments"), false);
     await page.evaluate(() => {
         setTimeout(() => {
-            document.querySelectorAll(".shortcut-widget-box")[1].innerHTML = '<div class="indicator-pill">17</div>';
+            document.querySelectorAll(".shortcut-widget-box")[1].innerHTML = '<div class="count-badge">17</div>';
+            frappe.request.ajax_count = 0;
         }, 75);
     });
     await page.waitForFunction(workspaceShortcutsReady, "Payments", { timeout: 2000 });
-    assert.deepEqual(await page.locator(".indicator-pill").allTextContents(), ["0", "17"]);
+    assert.equal(await page.locator(".shortcut-widget-box").first().innerText(), "");
+    assert.deepEqual(await page.locator(".count-badge").allTextContents(), ["17"]);
 });
 
-test("missing or empty counters fail instead of relaxing the screenshot gate", async t => {
+test("unknown or unsettled request state fails the readiness gate", async t => {
     const page = await fixture(t, [counted("Invoices")]);
-    for (const html of ["", '<div class="indicator-pill"> </div>']) {
-        await page.locator(".shortcut-widget-box").evaluate((widget, value) => { widget.innerHTML = value; }, html);
-        await assert.rejects(page.waitForFunction(workspaceShortcutsReady, "Payments", { timeout: 100 }),
-            { name: "TimeoutError" });
+    for (const pending of [1, -1, null]) {
+        await page.evaluate(value => { frappe.request.ajax_count = value; }, pending);
+        assert.equal(await page.evaluate(workspaceShortcutsReady, "Payments"), false);
     }
 });
 
