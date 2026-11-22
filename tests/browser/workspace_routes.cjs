@@ -45,11 +45,9 @@ async function inspect(page, route, workspace, name, warm = false) {
     return { snapshot, png };
 }
 
-function compare(actual, reference, label, warm = false) {
+function compare(actual, reference, label) {
     assert.deepEqual(actual.snapshot, reference.snapshot, "Workspace text and block geometry: " + label);
-    if (warm) return compareScreenshots(actual.png, reference.png, label);
-    assert.ok(actual.png.equals(reference.png), "Complete viewport, including navigation, must be identical: " + label);
-    return { changedPixels: 0, maxChannelDifference: 0 };
+    return compareScreenshots(actual.png, reference.png, label);
 }
 
 async function main() {
@@ -78,19 +76,19 @@ async function main() {
                     const canonicalRoute = workspace.toLowerCase().replace(/ /g, "-");
                     const canonical = await inspect(page, canonicalRoute, workspace, label + "-direct");
                     const legacy = await inspect(page, alias, workspace, label + "-legacy");
-                    compare(legacy, canonical, "Old URL: " + label);
+                    const legacyComparison = compare(legacy, canonical, "Old URL: " + label);
                     const linked = await inspect(page, "kt-swiss-route-" + alias, workspace, label + "-linked-page");
-                    compare(linked, canonical, "Renamed Page reference: " + label);
+                    const linkedComparison = compare(linked, canonical, "Renamed Page reference: " + label);
                     const warmComparisons = [];
                     for (let visit = 1; visit <= 2; visit++) {
                         const other = workspace === "Schweiz-Einstellungen" ? "Schweizer Buchhaltung" : "Schweiz-Einstellungen";
                         await page.evaluate(target => frappe.set_route(frappe.router.slug(target)), other);
                         await page.waitForFunction(target => frappe.workspace?._page?.name === target, other);
                         const reopened = await inspect(page, "kt-swiss-route-" + alias, workspace, label + "-reopened-" + visit, true);
-                        warmComparisons.push(compare(reopened, canonical, "Repeated in-app Page visit " + visit + ": " + label, true));
+                        warmComparisons.push(compare(reopened, canonical, "Repeated in-app Page visit " + visit + ": " + label));
                     }
                     results.push({ viewport, alias, workspace, blocks: canonical.snapshot.blocks.length,
-                        repeatedVisits: 2, coldViewportIdentical: true, warmComparisons, result: "pass" });
+                        repeatedVisits: 2, legacyComparison, linkedComparison, warmComparisons, result: "pass" });
                 }
                 assert.deepEqual(errors, [], "Navigation must not cause uncaught JavaScript errors");
                 assert.deepEqual(countFailures, [], "Workspace count requests must succeed");

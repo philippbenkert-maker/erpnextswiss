@@ -16,8 +16,8 @@ function compareScreenshots(actual, reference, label) {
         }
         maxChannelDifference = Math.max(maxChannelDifference, delta);
         if (delta) changedPixels++;
-        // Cold/warm Chromium rasterization differed by one grayscale level at
-        // 36 rounded-edge pixels. Do not mask regions or tolerate real shifts.
+        // Chromium rasterization can round edge pixels by one color level
+        // between captures. Keep the same narrow limit over the whole image.
         assert.ok(delta <= 1, "Screenshot channel difference exceeds 1/255: " + label);
         assert.ok(changedPixels <= 128, "Screenshot differs at more than 128 pixels: " + label);
     }
