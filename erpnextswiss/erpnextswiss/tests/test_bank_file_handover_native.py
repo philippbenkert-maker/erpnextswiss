@@ -1,5 +1,7 @@
 """Native DB, File and permission tests using synthetic, rollback-owned bank data."""
 
+from copy import deepcopy
+from decimal import Decimal
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -10,8 +12,11 @@ from frappe.core.doctype.file.utils import find_file_by_url
 from frappe.core.doctype.file.file import File
 from frappe.utils import CallbackManager
 from frappe.utils.file_manager import save_file
+from lxml import etree
 
+from erpnextswiss.erpnextswiss import ebics_automation
 from erpnextswiss.erpnextswiss.tests import test_bank_matching_native as matching_tests
+from erpnextswiss.erpnextswiss.tests.test_bank_camt_preview import detailed_xml
 from erpnextswiss.erpnextswiss.tests.test_bank_file_admission import PROFILE, xml, zipped
 from erpnextswiss.scripts import bank_file_handover as handover
 from erpnextswiss.scripts.bank_file_admission import BankFileError
@@ -97,6 +102,65 @@ class TestBankFileHandoverNative(unittest.TestCase):
         self.assertEqual(frappe.db.get_value(handover.DOCTYPE, first['name'], 'original_file'), original)
         self.assertEqual(frappe.db.count('File', {'attached_to_doctype': handover.DOCTYPE,
                                                 'attached_to_name': first['name']}), 1)
+
+    def test_multi_invoice_payment_remains_exact_after_original_handover_and_replay(self):
+        supplier = 'KT-MULTI-SUPPLIER-' + self.key
+        self.row('Supplier', supplier, supplier_name=supplier, disabled=0)
+        invoices = {}
+        references = []
+        for index, amount in enumerate(('12.34', '7.66'), start=1):
+            reference = f'KT-MULTI-{self.key}-{index}'
+            name = f'KT-PINV-{self.key}-{index}'
+            self.row('Purchase Invoice', name, company=self.company_a, docstatus=1, currency='CHF',
+                     supplier=supplier, outstanding_amount=amount, grand_total=amount, bill_no=reference)
+            references.append(reference)
+            invoices[name] = Decimal(amount)
+        self.row('Purchase Invoice', f'KT-PINV-FOREIGN-{self.key}', company=self.company_b,
+                 docstatus=1, currency='CHF', supplier=supplier, outstanding_amount='12.34',
+                 grand_total='12.34', bill_no=references[0])
+
+        root = etree.fromstring(detailed_xml(amounts=('20.00',), remark=' '.join(references),
+                                             reference=f'KT-MULTI-BANK-{self.key}'))
+        ns = {'b': root.nsmap[None]}
+        entry_xml = root.find('.//b:Ntry', ns)
+        entry_xml.find('b:CdtDbtInd', ns).text = 'DBIT'
+        creditor = entry_xml.find('.//b:Dbtr', ns)
+        creditor.tag = '{' + ns['b'] + '}Cdtr'
+        creditor.find('b:Pty/b:Nm', ns).text = supplier
+        closing = root.find('.//b:Stmt/b:Bal', ns)
+        opening = deepcopy(closing)
+        opening.find('b:Tp/b:CdOrPrtry/b:Cd', ns).text = 'OPBD'
+        opening.find('b:Amt', ns).text = '1254.00'
+        closing.addprevious(opening)
+        payload = zipped([('two-invoices.xml', etree.tostring(root, encoding='UTF-8', xml_declaration=True))])
+        frappe.db.set_single_value('ERPNextSwiss Settings', 'always_use_entry_transaction_type', 1)
+        frappe.db.set_single_value('ERPNextSwiss Settings', 'always_use_entry_amount', 0)
+        protected = ('Purchase Invoice', 'Payment Entry', 'Bank Transaction', 'GL Entry')
+        counts = {doctype: frappe.db.count(doctype) for doctype in protected}
+
+        first = self.stage(payload, source_reference='two-invoice-payment')
+        self.assertFalse(first['replayed'])
+        self.assertFalse(first['import_approved'])
+        document = frappe.get_doc(handover.DOCTYPE, first['name'])
+        connection = frappe.get_doc('ebics Connection', self.connection)
+        for attempt in range(2):
+            if attempt:
+                replay = self.stage(payload, source_reference='two-invoice-payment')
+                self.assertEqual((replay['name'], replay['receipt_count']), (first['name'], 1))
+                self.assertTrue(replay['replayed'])
+            preview = handover.get_handover_preview(first['name'])
+            statement, = preview['statements']
+            entry, = statement['entries']
+            self.assertEqual(statement['balance_check'], 'matched')
+            match = ebics_automation._strict_invoice_candidates(connection, statement, entry)
+            self.assertIsNotNone(match)
+            _, doctype, records, amount = match
+            self.assertEqual((doctype, amount), ('Purchase Invoice', Decimal('20.00')))
+            self.assertEqual({invoice.name: Decimal(str(invoice.outstanding_amount)) for invoice in records}, invoices)
+        self.assertEqual(handover._original(document), payload)
+        self.assertEqual(frappe.db.count('File', {'attached_to_doctype': handover.DOCTYPE,
+                                                'attached_to_name': first['name']}), 1)
+        self.assertEqual({doctype: frappe.db.count(doctype) for doctype in protected}, counts)
 
     def test_source_reference_cannot_be_rebound_to_changed_original_or_account_scope(self):
         first = self.stage()

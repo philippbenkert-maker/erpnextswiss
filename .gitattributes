@@ -1,0 +1,2 @@
+# Preserve the exact bytes of the published, checksum-pinned eCH schemas.
+/erpnextswiss/resources/ech0217_v2/*.xsd -text whitespace=cr-at-eol
