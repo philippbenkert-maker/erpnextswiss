@@ -182,17 +182,21 @@ class TestBankFileHandoverNative(unittest.TestCase):
             self.assertEqual(len(preview['statements']), 2)
             self.assertEqual(frappe.db.get_value(handover.DOCTYPE, result['name'], 'entry_count'), 0)
 
-    def test_zip_that_native_file_decodes_as_text_stays_byte_identical(self):
+    def test_bank_original_stays_binary_even_if_content_detection_returns_unknown(self):
         from erpnextswiss.erpnextswiss.tests.bank_handover_process_acceptance import _payload
 
         payload = _payload()
         result = self.stage(payload)
         document = frappe.get_doc(handover.DOCTYPE, result['name'])
         source = frappe.get_doc('File', document.original_file)
-        native = File.get_content(source)
-        self.assertIsInstance(native, str, 'Fixture must reproduce native binary-to-text decoding')
-        self.assertNotEqual(native.encode(), payload)
         self.assertEqual(source.get_content(), payload)
+        # Simulate a native binary-classification miss without depending on
+        # the ZIP signatures or default encodings of a Frappe point release.
+        with patch('frappe.core.doctype.file.file.filetype.guess', return_value=None):
+            native = File.get_content(source, encodings=('latin-1',))
+            self.assertIsInstance(native, str)
+            self.assertNotEqual(native.encode(), payload)
+            self.assertEqual(source.get_content(encodings=('latin-1',)), payload)
         self.assertEqual(handover._original(document), payload)
         self.assertTrue(self.stage(payload)['replayed'])
 
