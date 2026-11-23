@@ -166,7 +166,7 @@ def get_default_accounts(bank_account=None, company=None):
         frappe.throw(_("Select a company or bank account"))
     receivable_account = frappe.get_value('Company', company, 'default_receivable_account')
     payable_account = frappe.get_value('Company', company, 'default_payable_account')
-    expense_payable_account = frappe.get_value('Company', company, 'default_expense_claim_payable_account') or payable_account
+    expense_payable_account = _expense_payable_account(company, payable_account)
     auto_process_matches = frappe.get_value('ERPNextSwiss Settings', 'ERPNextSwiss Settings', 'auto_process_matches')
     return {
         'company': company,
@@ -198,13 +198,20 @@ def get_receivable_account(company=None):
     account = frappe.get_value('Company', company, 'default_receivable_account')
     return {'account': account or "" }
 
+def _expense_payable_account(company, payable_account):
+    fieldname = "default_expense_claim_payable_account"
+    if frappe.get_meta("Company").has_field(fieldname):
+        return frappe.get_value("Company", company, fieldname) or payable_account
+    return payable_account
+
+
 @frappe.whitelist()
 def get_payable_account(company=None, employee=False):
     if not company:
         company = get_first_company()
     account = frappe.get_value('Company', company, 'default_payable_account')
     if employee:
-        account = frappe.get_value('Company', company, 'default_expense_claim_payable_account') or account
+        account = _expense_payable_account(company, account)
     return {'account': account or "" }
 
 def get_first_company():

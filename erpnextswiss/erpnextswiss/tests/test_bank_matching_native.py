@@ -65,6 +65,22 @@ class TestBankMatchingNative(unittest.TestCase):
                 "<BkTxCd><Prtry><Cd>TEST</Cd></Prtry></BkTxCd>" + details + "</Ntry>")
         return BeautifulSoup(text, "lxml").find_all("ntry")
 
+    def test_default_accounts_allow_optional_expense_account(self):
+        field = "default_expense_claim_payable_account"
+        frappe.db.set_value("Company", self.company_a, "default_payable_account", self.account_a)
+
+        def check(expense_account):
+            accounts = bank_wizard.get_default_accounts(bank_account=self.account_a)
+            self.assertEqual(accounts["payable_account"], self.account_a)
+            self.assertEqual(accounts["expense_payable_account"], expense_account)
+            self.assertEqual(bank_wizard.get_payable_account(self.company_a, employee=True),
+                             {"account": expense_account})
+
+        check(self.account_a)
+        if frappe.get_meta("Company").has_field(field):
+            frappe.db.set_value("Company", self.company_a, field, self.account_other)
+            check(self.account_other)
+
     def test_same_reference_only_suppresses_same_active_account_payment(self):
         self.row("Payment Entry", "KT-PE-B-" + self.key, company=self.company_b,
                  reference_no="shared-test-reference", paid_to=self.account_b, docstatus=1)
