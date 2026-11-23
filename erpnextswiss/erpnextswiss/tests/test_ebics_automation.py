@@ -144,8 +144,6 @@ class TestEbicsAutomation(TestCase):
                                            allocated_amount=100)]
         with (patch.object(automation.frappe, "get_doc", side_effect=[invoice, payment]),
               patch.object(automation.frappe.db, "exists", return_value=False),
-              patch.object(automation.frappe.db, "savepoint"),
-              patch.object(automation.frappe.db, "rollback") as rollback,
               patch("erpnextswiss.erpnextswiss.page.bank_wizard.bank_wizard.get_default_accounts",
                     return_value={"receivable_account": "AR"}),
               patch("erpnextswiss.erpnextswiss.page.bank_wizard.bank_wizard.make_payment_entry",
@@ -154,7 +152,6 @@ class TestEbicsAutomation(TestCase):
                 automation._book_exact_match(connection, statement, entry, "EBICS-1")
         self.assertFalse(make_payment.call_args.kwargs["auto_submit"])
         payment.submit.assert_not_called()
-        rollback.assert_called_once()
 
     def test_auto_booking_submits_one_exact_payment(self):
         statement, entry = self._candidate()
@@ -174,7 +171,6 @@ class TestEbicsAutomation(TestCase):
                                            allocated_amount=100)]
         with (patch.object(automation.frappe, "get_doc", side_effect=[invoice, payment]),
               patch.object(automation.frappe.db, "exists", return_value=False),
-              patch.object(automation.frappe.db, "savepoint"),
               patch.object(automation.frappe.db, "commit") as commit,
               patch("erpnextswiss.erpnextswiss.page.bank_wizard.bank_wizard.get_default_accounts",
                     return_value={"receivable_account": "AR"}),
@@ -184,7 +180,7 @@ class TestEbicsAutomation(TestCase):
         self.assertFalse(make_payment.call_args.kwargs["auto_submit"])
         self.assertEqual(make_payment.call_args.kwargs["paid_to"], "AKB bank account")
         payment.submit.assert_called_once()
-        commit.assert_called_once()
+        commit.assert_not_called()
 
     def test_auto_booking_submits_one_payment_for_two_exact_invoices(self):
         statement, entry = self._multi_invoice_candidate()
@@ -208,7 +204,6 @@ class TestEbicsAutomation(TestCase):
         ]
         with (patch.object(automation.frappe, "get_doc", side_effect=[*invoices, payment]),
               patch.object(automation.frappe.db, "exists", return_value=False),
-              patch.object(automation.frappe.db, "savepoint"),
               patch.object(automation.frappe.db, "commit") as commit,
               patch("erpnextswiss.erpnextswiss.page.bank_wizard.bank_wizard.get_default_accounts",
                     return_value={"payable_account": "AP"}),
@@ -219,7 +214,7 @@ class TestEbicsAutomation(TestCase):
         self.assertEqual(make_payment.call_args.kwargs["references"],
                          repr(["ACC-PINV-2026-00084", "ACC-PINV-2026-00085"]))
         payment.submit.assert_called_once()
-        commit.assert_called_once()
+        commit.assert_not_called()
 
     def test_replayed_entry_never_creates_a_second_payment(self):
         statement, entry = self._candidate()
@@ -916,8 +911,51 @@ class TestEbicsAutomation(TestCase):
         self.assertEqual(result, {'booked': 0, 'review': 0})
         existing.assert_called_once()
         book.assert_not_called()
-        record.db_set.assert_called_once_with({
-            'booked_count': 2, 'review_count': 0, 'processing_state': 'Completed'}, commit=True)
+        self.assertEqual(record.booked_count, 2)
+        record.db_set.assert_called_once_with({'review_count': 0, 'processing_state': 'Completed'}, commit=True)
+
+    def test_receipt_count_and_payment_commit_before_finalization(self):
+        entry = {"issues": []}
+        record = MagicMock(ack_state="Confirmed", new_file_hashes_json='["hash"]',
+                           booked_count=2)
+        record.name = "EBICS-1"
+        calls = MagicMock()
+        record.db_set = calls.finalize
+        calls.finalize.side_effect = InterruptedError
+        calls.book.return_value = True
+        with (patch.object(automation, "_verify_receipt"),
+              patch.object(automation, "_preview", return_value={"statements": [{"entries": [entry]}]}),
+              patch.object(automation, "_already_booked_entry", return_value=False),
+              patch.object(automation, "_book_exact_match", calls.book),
+              patch.object(automation.frappe.db, "savepoint"),
+              patch.object(automation.frappe.db, "set_value", calls.count),
+              patch.object(automation.frappe.db, "commit", calls.commit),
+              self.assertRaises(InterruptedError)):
+            automation._process_download(MagicMock(), record)
+        self.assertEqual([call[0] for call in calls.mock_calls], ["book", "count", "commit", "finalize"])
+        calls.count.assert_called_once_with("EBICS Download", "EBICS-1", "booked_count", 3, update_modified=False)
+        self.assertEqual(record.booked_count, 3)
+
+    def test_failed_receipt_progress_write_rolls_back_the_payment(self):
+        entry = {"issues": []}
+        record = MagicMock(ack_state="Confirmed", new_file_hashes_json='["hash"]',
+                           booked_count=0)
+        record.name = "EBICS-1"
+        with (patch.object(automation, "_verify_receipt"),
+              patch.object(automation, "_preview", return_value={"statements": [{"entries": [entry]}]}),
+              patch.object(automation, "_already_booked_entry", return_value=False),
+              patch.object(automation, "_book_exact_match", return_value=True),
+              patch.object(automation.frappe.db, "savepoint") as savepoint,
+              patch.object(automation.frappe.db, "set_value", side_effect=RuntimeError),
+              patch.object(automation.frappe.db, "commit") as commit,
+              patch.object(automation.frappe.db, "rollback") as rollback,
+              patch.object(automation.frappe, "log_error")):
+            result = automation._process_download(MagicMock(), record)
+        self.assertEqual(result, {"booked": 0, "review": 1})
+        rollback.assert_called_once_with(save_point=savepoint.call_args.args[0])
+        commit.assert_not_called()
+        self.assertEqual(record.booked_count, 0)
+        record.db_set.assert_called_once_with({"review_count": 1, "processing_state": "Review"}, commit=True)
 
     @staticmethod
     def _invoice():

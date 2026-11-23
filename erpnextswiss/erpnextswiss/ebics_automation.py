@@ -604,6 +604,7 @@ def _already_booked_entry(connection, statement, entry):
 
 
 def _book_exact_match(connection, statement, entry, download_name):
+    """Submit an exact payment inside the caller's receipt transaction."""
     matched = _strict_invoice_candidates(connection, statement, entry)
     if matched is None:
         return False
@@ -627,43 +628,36 @@ def _book_exact_match(connection, statement, entry, download_name):
         "auto_submit": False, "party_iban": candidate.get("party_iban"),
         "company": connection.company,
     }
-    savepoint = "ebics_booking_" + sha256(reference.encode()).hexdigest()[:20]
-    frappe.db.savepoint(savepoint)
-    try:
-        invoice = invoices[0]
-        discount = _contract_discount(invoice, amount, candidate['date']) if len(invoices) == 1 else Decimal('0.00')
-        if discount:
-            payment = _discount_payment(invoice, doctype, candidate, statement, amount, download_name)
-        else:
-            result = make_payment_entry(**payload)
-            payment = frappe.get_doc("Payment Entry", result["payment_entry"])
-        references = payment.references or []
-        expected_allocations = {
-            invoice.name: _money(invoice.outstanding_amount)
-            for invoice in invoices
-        }
-        actual_allocations = {
-            reference.reference_name: _money(reference.allocated_amount)
-            for reference in references
-            if reference.reference_doctype == doctype
-        }
-        if (payment.docstatus != 0 or payment.company != connection.company
-                or payment.party != candidate["party_match"]
-                or _money(payment.paid_amount) != amount
-                or _money(payment.received_amount) != amount
-                or Decimal(str(payment.difference_amount or 0)) != 0
-                or Decimal(str(payment.unallocated_amount or 0)) != 0
-                or (not discount and payment.deductions) or len(references) != len(invoices)
-                or (discount and sum(Decimal(str(d.amount)) for d in payment.deductions) != discount)
-                or len(actual_allocations) != len(invoices)
-                or actual_allocations != expected_allocations):
-            raise BankFileError("Candidate payment differs from the confirmed bank and invoice amount")
-        payment.submit()
-        frappe.db.commit()
-        return True
-    except Exception:
-        frappe.db.rollback(save_point=savepoint)
-        raise
+    invoice = invoices[0]
+    discount = _contract_discount(invoice, amount, candidate['date']) if len(invoices) == 1 else Decimal('0.00')
+    if discount:
+        payment = _discount_payment(invoice, doctype, candidate, statement, amount, download_name)
+    else:
+        result = make_payment_entry(**payload)
+        payment = frappe.get_doc("Payment Entry", result["payment_entry"])
+    references = payment.references or []
+    expected_allocations = {
+        invoice.name: _money(invoice.outstanding_amount)
+        for invoice in invoices
+    }
+    actual_allocations = {
+        reference.reference_name: _money(reference.allocated_amount)
+        for reference in references
+        if reference.reference_doctype == doctype
+    }
+    if (payment.docstatus != 0 or payment.company != connection.company
+            or payment.party != candidate["party_match"]
+            or _money(payment.paid_amount) != amount
+            or _money(payment.received_amount) != amount
+            or Decimal(str(payment.difference_amount or 0)) != 0
+            or Decimal(str(payment.unallocated_amount or 0)) != 0
+            or (not discount and payment.deductions) or len(references) != len(invoices)
+            or (discount and sum(Decimal(str(d.amount)) for d in payment.deductions) != discount)
+            or len(actual_allocations) != len(invoices)
+            or actual_allocations != expected_allocations):
+        raise BankFileError("Candidate payment differs from the confirmed bank and invoice amount")
+    payment.submit()
+    return True
 
 
 def _process_download(connection, record):
@@ -688,18 +682,27 @@ def _process_download(connection, record):
         for entry in statement["entries"]:
             if not entry['issues'] and _already_booked_entry(connection, statement, entry):
                 continue
+            savepoint = "ebics_entry_booking"
+            frappe.db.savepoint(savepoint)
             try:
                 if _book_exact_match(connection, statement, entry, record.name):
+                    # A resumed download skips posted payments, so their count must
+                    # already be durable even if finalizing the receipt is interrupted.
+                    booked_count = int(record.booked_count or 0) + 1
+                    frappe.db.set_value("EBICS Download", record.name, "booked_count",
+                                        booked_count, update_modified=False)
+                    frappe.db.commit()
+                    record.booked_count = booked_count
                     booked += 1
                 else:
                     review += 1
             except Exception as error:
+                frappe.db.rollback(save_point=savepoint)
                 # An isolated candidate is never allowed to book a difference or
                 # block archiving the other bank entries. It stays visible for review.
                 review += 1
                 frappe.log_error(title="EBICS candidate requires review", message=type(error).__name__)
-    record.db_set({"booked_count": int(record.booked_count or 0) + booked, "review_count": review,
-                   "processing_state": "Review" if review else "Completed"}, commit=True)
+    record.db_set({"review_count": review, "processing_state": "Review" if review else "Completed"}, commit=True)
     return {"booked": booked, "review": review}
 
 
