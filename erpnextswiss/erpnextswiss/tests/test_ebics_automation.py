@@ -1090,6 +1090,15 @@ class TestEbicsAutomation(TestCase):
         self.assertEqual(update["mirrored_count"], 1)
         self.assertEqual(json.loads(update["movement_map_json"])[0]["bank_transaction"], "ACC-BTN-1")
 
+    def test_native_movement_party_treats_legacy_placeholder_as_optional(self):
+        self.assertEqual(automation._movement_party({"candidates": [
+            {"party_name": "???", "party_iban": "???"}]}), {})
+        self.assertEqual(automation._movement_party({"candidates": [
+            {"party_name": "Test Company", "party_iban": "???"}]}), {"bank_party_name": "Test Company"})
+        self.assertEqual(automation._movement_party({"candidates": [
+            {"party_name": "Test Company", "party_iban": "CH9300762011623852957"}]}),
+            {"bank_party_name": "Test Company", "bank_party_iban": "CH9300762011623852957"})
+
     def test_receipt_conflict_reloads_durable_progress_before_retry(self):
         old = MagicMock(booked_count=2)
         old.name = "EBICS-1"

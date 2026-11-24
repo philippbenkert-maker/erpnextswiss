@@ -15,6 +15,7 @@ from zipfile import ZIP_STORED, ZipFile
 import frappe
 from frappe.config import get_site_config
 from frappe.exceptions import QueryDeadlockError
+from frappe.utils import validate_iban
 
 from erpnextswiss.scripts.bank_camt_preview import preview_camt_archive
 from erpnextswiss.scripts.bank_file_admission import BankFileError, MAX_FILE_BYTES, MAX_TOTAL_BYTES, read_bank_archive
@@ -429,10 +430,14 @@ def _movement_party(entry):
     if len(parties) != 1:
         return {}
     bank_name, bank_iban = next(iter(parties))
-    return {
-        "bank_party_name": bank_name,
-        "bank_party_iban": bank_iban,
-    }
+    # Some legacy matcher results contain display placeholders instead of
+    # party data. Keep the verified movement even when this enrichment is absent.
+    party = {}
+    if bank_name and bank_name not in ("???", "not found"):
+        party["bank_party_name"] = bank_name
+    if isinstance(bank_iban, str) and validate_iban(bank_iban):
+        party["bank_party_iban"] = bank_iban
+    return party
 
 
 def _movement_shape_matches(row, bank_account, statement, entry, *, company=None):
