@@ -57,6 +57,70 @@ abgesicherten Pfad. Legacy-Importer dürfen nicht direkt als Tagesjob laufen.
   Fehler bleiben zur Pruefung.
 - Es wird **kein** pain.001 versandt und kein Zahlungsvorschlag freigegeben.
 
+## Native Bankbewegungen und historische Übernahme
+
+Jeder sicher identifizierte, gebuchte `Ntry` eines bestätigten CHF- oder
+EUR-Auszugs wird zusätzlich als native `Bank Transaction` gespiegelt. Der
+Spiegel übernimmt Firmenbankkonto, Währung, Buchungsdatum und genau eine
+Einzahlungs- oder Auszahlungsseite. Er erzeugt weder `GL Entry` noch
+`Payment Entry` und setzt ohne native Zuordnung keinen künstlichen Status
+`Reconciled`.
+
+Die fachliche Identität stammt ausschliesslich aus einer eindeutigen
+bankseitigen Referenz. Ein einzelner UETR sowie Account-Service-, Entry- und
+Transaktionsreferenzen werden gemeinsam auf dieselbe native Bewegung gebunden.
+`PmtInfId` bezeichnet eine Zahlungsgruppe und wird dafür nicht verwendet.
+Betrag, Datum oder Gegenpartei allein werden nie als Identität erfunden. Eine
+gleiche Bank-ID mit geändertem Betrag, Datum, Richtung oder Konto bleibt zur
+Prüfung. Dadurch überlappen camt.053 und camt.054 nicht doppelt, sofern sie die
+gleiche belastbare Bank-ID führen. Die ursprüngliche Bewegungs-ID bleibt auch
+bei einer später ergänzten UETR erhalten. Die unveränderliche Tabelle
+`EBICS Movement Alias` bindet jede konten- und währungsgebundene Referenz über
+einen eindeutigen Datenbankschlüssel an genau eine Bewegung. Der Inhalts-Hash
+enthält keine wechselnde bevorzugte Referenz. Bereits mit dem früheren
+referenzabhängigen Hash markierte Zeilen werden bei Abweichung zur Prüfung
+gestellt; sie werden weder still ummarkiert noch nochmals angelegt.
+Jede Quellposition wird im bestätigten
+`EBICS Download` mit Datei-, Statement-, Entry-Hash und nativer
+Bankbewegungsnummer protokolliert.
+
+Bestehende native Bankbewegungen werden nur übernommen, wenn Konto, Währung,
+Datum, Betrag, Richtung **und** Bankreferenz exakt stimmen. Eine nur ähnlich
+aussehende historische CHF-Zeile blockiert die automatische Übernahme, statt
+eine Dublette zu erzeugen. Die Funktion
+`mirror_historical_bank_movements(connection_name)` ist standardmässig ein
+reiner Dry-Run. `apply=True` wird vollständig verweigert, solange der Plan auch
+nur einen ungeklärten Eintrag enthält. Der anschliessende Apply-Lauf prüft alle
+Identitäten erneut und schreibt atomar; bei Fehler wird der gesamte Backfill
+zurückgerollt. Hauptbuch, Zahlungen und Bankprovider bleiben unverändert.
+
+Der Schreibpfad sperrt das Firmenbankkonto unabhängig von der EBICS-Verbindung
+und liest Referenzen und Bewegungen danach mit aktuellen Zeilensperren erneut.
+Vor einer Altübernahme müssen zusätzlich sämtliche zuvor gelesenen nativen
+Referenzen, Firma, Status, Bewegungs-ID, Inhalts-Hash, Herkunft und Änderungszeit
+unverändert sein. Ein anderer Bearbeiter darf nicht überschrieben werden.
+Auch eine noch unmarkierte, früher stornierte Altzeile sperrt die erneute
+Übernahme ihrer Bankreferenz; eine andere Referenz mit gleichem Datum und Betrag
+bleibt eine eigenständige Bewegung. Stornierungen werden nicht still aufgehoben.
+
+Die neue Tabelle und ihre Leserechte werden regulär mit der App migriert; die
+bestehenden 45 Custom-Field-Definitionen bleiben unverändert. Lokale
+Verhaltenstests: `python -I -S -B scripts/test_ebics_movement_offline.py`.
+Der vollständige Offline-Adapterlauf bleibt `scripts/test_ebics_reader_offline.py`.
+Native Abnahme ist ein eigener Schritt auf einem pausierten, isolierten Restore:
+`scripts/ebics_movement_native_check.py` prüft echte Insert/Submit-, Unique- und
+Unveränderlichkeitsregeln sowie zwei unabhängige SQL-Sitzungen (gleichzeitiger
+Import und veraltete Repeatable-Read-Altübernahme). Synthetische Daten werden
+vollständig entfernt und Banktabellen sowie Finanzdaten mit Hashes verglichen.
+Die vier zwingenden nativen Fälle liegen in `native_ebics_movement_cases.py`,
+werden ausschliesslich explizit geladen und dürfen weder übersprungen werden
+noch die allgemeine Testsuche an einer anders benannten Testsite blockieren.
+Mit `--archive-connection` und `--expected-eur-evidence` wird zusätzlich der
+genau gepinnte Nachweis der fünf archivierten EUR-Positionen geprüft, das Archiv
+im Restore übernommen und erneut abgespielt. Ohne diesen Teil meldet der Lauf
+ausdrücklich `SYNTHETIC_PASS_ARCHIVE_NOT_RUN`. Er ist keine Produktionsfreigabe;
+Produktivmigration, freigegebener Backfill und Sichtprüfung bleiben notwendig.
+
 ## Vertragliches Skonto und Wiederprüfung
 
 Für Ausgangsrechnungen wird Skonto nur erkannt, wenn die gesamte Rechnung
@@ -101,7 +165,7 @@ Hauptbuchzeilen und Wiederholbarkeit; sämtliche Testbuchungen werden zurückger
 ## Betrieb und Ruecknahme
 
 `EBICS Download` zeigt Empfangs-, Quittungs- und Buchungsstatus sowie die Anzahl
-automatischer Buchungen und Prueffaelle. Fehlerlogs enthalten nur Fehlertypen,
+nativer Bankbewegungen, automatischer Buchungen und Prueffaelle. Fehlerlogs enthalten nur Fehlertypen,
 keine Banknutzdaten. Bei Problemen zuerst `enable_sync=0` setzen. Archivierte
 Bankdaten und bereits gebuchte `Payment Entry` bleiben bestehen und duerfen
 nicht durch ein Code-Rollback automatisch geloescht oder storniert werden.

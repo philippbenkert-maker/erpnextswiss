@@ -1,0 +1,26 @@
+{
+ "doctype": "DocType",
+ "name": "EBICS Movement Alias",
+ "module": "ERPNextSwiss",
+ "autoname": "field:alias_id",
+ "engine": "InnoDB",
+ "track_changes": 0,
+ "allow_rename": 0,
+ "index_web_pages_for_search": 0,
+ "field_order": ["alias_id", "bank_transaction", "company", "bank_account", "account", "currency", "source_download"],
+ "fields": [
+  {"fieldname": "alias_id", "fieldtype": "Data", "label": "Scoped bank reference SHA-256", "read_only": 1, "reqd": 1, "unique": 1},
+  {"fieldname": "bank_transaction", "fieldtype": "Link", "label": "Bank Transaction", "options": "Bank Transaction", "read_only": 1, "reqd": 1, "in_list_view": 1},
+  {"fieldname": "company", "fieldtype": "Link", "label": "Company", "options": "Company", "read_only": 1, "reqd": 1},
+  {"fieldname": "bank_account", "fieldtype": "Link", "label": "Bank Account", "options": "Bank Account", "read_only": 1, "reqd": 1},
+  {"fieldname": "account", "fieldtype": "Link", "label": "Ledger account", "options": "Account", "read_only": 1, "reqd": 1},
+  {"fieldname": "currency", "fieldtype": "Link", "label": "Currency", "options": "Currency", "read_only": 1, "reqd": 1},
+  {"fieldname": "source_download", "fieldtype": "Link", "label": "First verified source for this reference", "options": "EBICS Download", "read_only": 1, "reqd": 1}
+ ],
+ "permissions": [
+  {"role": "Accounts Manager", "read": 1, "report": 1},
+  {"role": "System Manager", "read": 1, "report": 1}
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC"
+}

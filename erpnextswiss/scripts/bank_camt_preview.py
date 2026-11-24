@@ -23,6 +23,15 @@ def _date(node, path):
     return _text(node, path + '/Dt') or _text(node, path + '/DtTm')
 
 
+def _texts(node, path):
+    values = []
+    for element in node.findall(path):
+        value = (element.text or '').strip()
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
 def _money(node):
     amount = node.find('Amt')
     return {'amount': amount.text, 'currency': amount.get('Ccy'),
@@ -67,16 +76,27 @@ def prepare_camt_archive(payload, profile=None):
                 entry_count += 1
                 if entry_count > MAX_ENTRIES:
                     raise BankFileError('Bank preview exceeds entry limits')
+                bank_reference_ids = {
+                    'account_service_reference': _texts(entry, 'AcctSvcrRef'),
+                    'entry_reference': _texts(entry, 'NtryRef'),
+                    'uetr': _texts(entry, 'NtryDtls/TxDtls/Refs/UETR'),
+                    'detail_account_service_reference': _texts(
+                        entry, 'NtryDtls/TxDtls/Refs/AcctSvcrRef'),
+                    'transaction_id': _texts(entry, 'NtryDtls/TxDtls/Refs/TxId'),
+                    'payment_information_id': _texts(
+                        entry, 'NtryDtls/TxDtls/Refs/PmtInfId'),
+                }
                 entries.append({'index': entry_index, **_money(entry),
                                 'status': _text(entry, 'Sts/Cd') or _text(entry, 'Sts/Prtry') or _text(entry, 'Sts'),
                                 'booking_date': _date(entry, 'BookgDt'), 'value_date': _date(entry, 'ValDt'),
                                 'reversal': _text(entry, 'RvslInd') in ('true', '1'),
                                 'reference': _text(entry, 'AcctSvcrRef'), 'entry_reference': _text(entry, 'NtryRef'),
                                 'detail_count': len(entry.findall('NtryDtls/TxDtls')),
-                                'bank_detail_references': [value for path in (
-                                    'NtryDtls/TxDtls/Refs/UETR', 'NtryDtls/TxDtls/Refs/AcctSvcrRef',
-                                    'NtryDtls/TxDtls/Refs/TxId', 'NtryDtls/TxDtls/Refs/PmtInfId')
-                                    for value in [entry.findtext(path)] if value],
+                                'bank_reference_ids': bank_reference_ids,
+                                'bank_detail_references': list(dict.fromkeys(
+                                    value for key in ('uetr', 'detail_account_service_reference',
+                                                      'transaction_id', 'payment_information_id')
+                                    for value in bank_reference_ids[key])),
                                 'xml': etree.tostring(entry, encoding='unicode')})
             balances = [{**_money(balance), 'type': _text(balance, 'Tp/CdOrPrtry/Cd'),
                          'proprietary_type': _text(balance, 'Tp/CdOrPrtry/Prtry'), 'date': _date(balance, 'Dt')}

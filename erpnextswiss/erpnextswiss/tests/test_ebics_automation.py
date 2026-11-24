@@ -773,6 +773,140 @@ class TestEbicsAutomation(TestCase):
         for value in ['NaN', 'Infinity', '-Infinity']:
             self.assertIsNone(automation._money(value))
 
+    @staticmethod
+    def _movement_entry(reference='BANK-MOVEMENT-1', amount='100.00'):
+        statement = {
+            'account': '1021 - Bank EUR', 'currency': 'EUR', 'iban': 'CH1',
+            'file_sha256': 'f' * 64, 'statement_id': 'STATEMENT-1',
+            'statement_index': 0,
+        }
+        entry = {
+            'index': 0, 'issues': [], 'status': 'BOOK', 'amount': amount,
+            'credit_debit': 'DBIT', 'booking_date': '2026-11-17',
+            'value_date': '2026-11-17', 'detail_count': 1,
+            'reference': 'ENTRY-REF', 'entry_reference': None,
+            'bank_reference_ids': {'uetr': [reference]},
+            'bank_detail_references': [reference], 'candidates': [],
+            'xml': '<Ntry><Amt Ccy="EUR">{0}</Amt></Ntry>'.format(amount),
+        }
+        return statement, entry
+
+    def test_movement_identity_is_stable_across_053_054_and_changed_content_conflicts(self):
+        connection = MagicMock(company='KT Wärmesysteme AG')
+        statement, entry = self._movement_entry()
+        bank_account = frappe._dict(name='Firmenkonto EUR', company=connection.company)
+        with patch.object(automation.frappe.db, 'get_values', side_effect=[
+                [bank_account], [], [], [], [], [], [bank_account], [], [], [], [], []]):
+            first = automation._movement_plan(connection, statement, entry)
+            second = automation._movement_plan(connection, statement, dict(entry))
+        self.assertEqual(first['state'], 'create')
+        self.assertEqual(first['identity'], second['identity'])
+        self.assertEqual(first['fingerprint'], second['fingerprint'])
+
+        changed = dict(entry, amount='101.00')
+        self.assertEqual(
+            automation._movement_identity(connection, statement, first['kind'], first['reference']),
+            first['identity'])
+        self.assertNotEqual(
+            automation._movement_fingerprint(connection, statement, changed,
+                                             first['kind'], first['reference']),
+            first['fingerprint'])
+
+    def test_legacy_bank_transaction_is_adopted_only_by_exact_reference(self):
+        connection = MagicMock(company='KT Wärmesysteme AG')
+        statement, entry = self._movement_entry(reference='BANK-REF-1')
+        bank_account = frappe._dict(name='Firmenkonto EUR', company=connection.company)
+        legacy = frappe._dict(
+            name='ACC-BTN-2026-00001', docstatus=1, date='2026-11-17',
+            company=connection.company, bank_account=bank_account.name, currency='EUR', deposit=0, withdrawal=100,
+            transaction_id='BANK-REF-1', reference_number=None,
+            custom_ebics_movement_id=None, custom_ebics_movement_fingerprint=None)
+        with patch.object(automation.frappe.db, 'get_values', side_effect=[[bank_account], [], [], [], [], [legacy]]):
+            self.assertEqual(automation._movement_plan(connection, statement, entry)['state'], 'adopt')
+
+        legacy.transaction_id = 'ANOTHER-REAL-MOVEMENT'
+        with patch.object(automation.frappe.db, 'get_values', side_effect=[[bank_account], [], [], [], [], [legacy]]):
+            result = automation._movement_plan(connection, statement, entry)
+        self.assertEqual(result['state'], 'review')
+        self.assertEqual(result['reason'], 'legacy_bank_transaction_conflict')
+
+    def test_native_movement_creation_submits_no_payment_or_gl_allocation(self):
+        connection = MagicMock(company='KT Wärmesysteme AG')
+        statement, entry = self._movement_entry()
+        plan = {
+            'state': 'create', 'identity': 'EBICS-MOV-' + 'a' * 64,
+            'fingerprint': 'b' * 64, 'reference': 'BANK-MOVEMENT-1',
+            'bank_account': 'Firmenkonto EUR', 'description': 'Bank movement',
+            'party': {}, 'entry_sha256': 'c' * 64, 'aliases': ['EBICS-MOV-' + 'a' * 64],
+        }
+        values = {}
+        transaction = MagicMock()
+        transaction.name = 'ACC-BTN-2026-00099'
+        transaction.docstatus = 0
+        transaction.payment_entries = []
+        transaction.insert.return_value = transaction
+
+        def get_value(key, default=None):
+            if key == automation._MOVEMENT_ID_FIELD:
+                return plan['identity']
+            if key == automation._MOVEMENT_FINGERPRINT_FIELD:
+                return plan['fingerprint']
+            return values.get(key, default)
+
+        transaction.get.side_effect = get_value
+        transaction.submit.side_effect = lambda: setattr(transaction, 'docstatus', 1)
+        with (patch.object(automation.frappe, 'get_doc', side_effect=lambda payload: (
+                values.update(payload) or transaction)),
+              patch.object(automation.frappe.db, 'savepoint'),
+              patch.object(automation.frappe.db, 'rollback'),
+              patch.object(automation, '_statement_bank_account', return_value=plan['bank_account']),
+              patch.object(automation, '_movement_plan', return_value=plan) as recheck,
+              patch.object(automation, '_claim_movement_aliases') as claim):
+            result = automation._apply_movement_plan(
+                connection, statement, entry, 'EBICS-DOWNLOAD-1', plan)
+        recheck.assert_called_once_with(connection, statement, entry, current=True)
+        claim.assert_called_once_with(connection, statement, 'EBICS-DOWNLOAD-1', transaction, plan)
+        self.assertEqual(result['state'], 'created')
+        transaction.insert.assert_called_once_with(ignore_permissions=True)
+        transaction.submit.assert_called_once_with()
+        self.assertNotIn('payment_entries', values)
+        self.assertNotIn('status', values)
+        self.assertEqual(values['withdrawal'], 100.0)
+        self.assertEqual(values['deposit'], 0)
+
+    def test_historical_movement_backfill_is_dry_run_and_fail_closed(self):
+        connection = MagicMock(name='AKB')
+        connection.name = 'AKB'
+        clean_plan = {
+            'receipts_checked': 4, 'entries_checked': 5, 'created': 5,
+            'adopted': 0, 'existing': 0, 'review': 0, 'review_reasons': {},
+        }
+        review_plan = {**clean_plan, 'created': 4, 'review': 1,
+                       'review_reasons': {'legacy_bank_transaction_conflict': 1}}
+        with (patch.object(automation.frappe, 'only_for') as only_for,
+              patch.object(automation.frappe, 'cache'),
+              patch.object(automation.frappe, 'get_doc', return_value=connection),
+              patch.object(automation, '_accounts'),
+              patch.object(automation, '_historical_movement_pass', return_value=clean_plan) as run,
+              patch.object(automation.frappe.db, 'commit') as commit):
+            result = automation.mirror_historical_bank_movements('AKB')
+        self.assertEqual(result['status'], 'dry_run')
+        only_for.assert_called_once_with(('Accounts Manager', 'System Manager'))
+        connection.check_permission.assert_called_once_with('read')
+        run.assert_called_once_with(connection, apply=False)
+        commit.assert_not_called()
+
+        with (patch.object(automation.frappe, 'only_for'),
+              patch.object(automation.frappe, 'cache'),
+              patch.object(automation.frappe, 'get_doc', return_value=connection),
+              patch.object(automation, '_accounts'),
+              patch.object(automation, '_historical_movement_pass', return_value=review_plan) as run,
+              patch.object(automation.frappe.db, 'commit') as commit):
+            result = automation.mirror_historical_bank_movements('AKB', apply=True)
+        self.assertEqual(result['status'], 'review_required')
+        self.assertEqual(run.call_count, 1)
+        commit.assert_not_called()
+
     def test_only_posted_exact_bank_payment_resolves_suppressed_candidate(self):
         statement, entry = self._candidate()
         statement['account'] = 'BANK'
@@ -905,6 +1039,9 @@ class TestEbicsAutomation(TestCase):
         with (patch.object(automation, '_verify_receipt', return_value=b'payload'),
               patch.object(automation, '_preview', return_value={
                   'statements': [{'entries': [entry]}]}),
+              patch.object(automation, '_mirror_bank_entry', return_value={
+                  'state': 'created', 'identity': 'EBICS-MOV-1',
+                  'entry_sha256': 'a' * 64, 'bank_transaction': 'ACC-BTN-1'}),
               patch.object(automation, '_already_booked_entry', return_value=True) as existing,
               patch.object(automation, '_book_exact_match') as book):
             result = automation._process_download(MagicMock(), record)
@@ -912,37 +1049,58 @@ class TestEbicsAutomation(TestCase):
         existing.assert_called_once()
         book.assert_not_called()
         self.assertEqual(record.booked_count, 2)
-        record.db_set.assert_called_once_with({'review_count': 0, 'processing_state': 'Completed'}, commit=True)
+        update = record.db_set.call_args.args[0]
+        self.assertNotIn("booked_count", update)
+        self.assertEqual(update["review_count"], 0)
+        self.assertEqual(update["mirrored_count"], 1)
+        self.assertEqual(json.loads(update["movement_map_json"])[0]["bank_transaction"], "ACC-BTN-1")
+        self.assertEqual(update["processing_state"], "Completed")
+        self.assertTrue(record.db_set.call_args.kwargs["commit"])
 
     def test_receipt_count_and_payment_commit_before_finalization(self):
         entry = {"issues": []}
         record = MagicMock(ack_state="Confirmed", new_file_hashes_json='["hash"]',
+                           profile=automation.PROFILE,
                            booked_count=2)
         record.name = "EBICS-1"
         calls = MagicMock()
         record.db_set = calls.finalize
-        calls.finalize.side_effect = InterruptedError
+        calls.finalize.side_effect = [InterruptedError, None]
         calls.book.return_value = True
-        with (patch.object(automation, "_verify_receipt"),
+        movement = {"state": "created", "identity": "EBICS-MOV-1",
+                    "entry_sha256": "a" * 64, "bank_transaction": "ACC-BTN-1"}
+        with (patch.object(automation, "_verify_receipt", return_value=b"payload"),
               patch.object(automation, "_preview", return_value={"statements": [{"entries": [entry]}]}),
-              patch.object(automation, "_already_booked_entry", return_value=False),
+              patch.object(automation, "_mirror_bank_entry",
+                           side_effect=[movement, {**movement, "state": "existing"}]),
+              patch.object(automation, "_already_booked_entry", side_effect=[False, True]),
               patch.object(automation, "_book_exact_match", calls.book),
               patch.object(automation.frappe.db, "savepoint"),
               patch.object(automation.frappe.db, "set_value", calls.count),
-              patch.object(automation.frappe.db, "commit", calls.commit),
-              self.assertRaises(InterruptedError)):
-            automation._process_download(MagicMock(), record)
-        self.assertEqual([call[0] for call in calls.mock_calls], ["book", "count", "commit", "finalize"])
+              patch.object(automation.frappe.db, "commit", calls.commit)):
+            with self.assertRaises(InterruptedError):
+                automation._process_download(MagicMock(), record)
+            replay = automation._process_download(MagicMock(), record)
+        self.assertEqual([call[0] for call in calls.mock_calls], ["book", "count", "commit", "finalize", "finalize"])
         calls.count.assert_called_once_with("EBICS Download", "EBICS-1", "booked_count", 3, update_modified=False)
         self.assertEqual(record.booked_count, 3)
+        self.assertEqual(replay, {"booked": 0, "review": 0})
+        update = calls.finalize.call_args.args[0]
+        self.assertNotIn("booked_count", update)
+        self.assertEqual(update["mirrored_count"], 1)
+        self.assertEqual(json.loads(update["movement_map_json"])[0]["bank_transaction"], "ACC-BTN-1")
 
     def test_failed_receipt_progress_write_rolls_back_the_payment(self):
         entry = {"issues": []}
         record = MagicMock(ack_state="Confirmed", new_file_hashes_json='["hash"]',
+                           profile=automation.PROFILE,
                            booked_count=0)
         record.name = "EBICS-1"
-        with (patch.object(automation, "_verify_receipt"),
+        movement = {"state": "created", "identity": "EBICS-MOV-1",
+                    "entry_sha256": "a" * 64, "bank_transaction": "ACC-BTN-1"}
+        with (patch.object(automation, "_verify_receipt", return_value=b"payload"),
               patch.object(automation, "_preview", return_value={"statements": [{"entries": [entry]}]}),
+              patch.object(automation, "_mirror_bank_entry", return_value=movement),
               patch.object(automation, "_already_booked_entry", return_value=False),
               patch.object(automation, "_book_exact_match", return_value=True),
               patch.object(automation.frappe.db, "savepoint") as savepoint,
@@ -955,7 +1113,12 @@ class TestEbicsAutomation(TestCase):
         rollback.assert_called_once_with(save_point=savepoint.call_args.args[0])
         commit.assert_not_called()
         self.assertEqual(record.booked_count, 0)
-        record.db_set.assert_called_once_with({"review_count": 1, "processing_state": "Review"}, commit=True)
+        update = record.db_set.call_args.args[0]
+        self.assertNotIn("booked_count", update)
+        self.assertEqual(update["review_count"], 1)
+        self.assertEqual(update["mirrored_count"], 1)
+        self.assertEqual(update["processing_state"], "Review")
+        self.assertTrue(record.db_set.call_args.kwargs["commit"])
 
     @staticmethod
     def _invoice():
