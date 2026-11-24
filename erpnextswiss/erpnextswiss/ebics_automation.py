@@ -14,6 +14,7 @@ from zipfile import ZIP_STORED, ZipFile
 
 import frappe
 from frappe.config import get_site_config
+from frappe.exceptions import QueryDeadlockError
 
 from erpnextswiss.scripts.bank_camt_preview import preview_camt_archive
 from erpnextswiss.scripts.bank_file_admission import BankFileError, MAX_FILE_BYTES, MAX_TOTAL_BYTES, read_bank_archive
@@ -652,6 +653,9 @@ def _apply_movement_plan(connection, statement, entry, source_download, plan):
             raise BankFileError("Native Bank Transaction differs from the verified EBICS movement")
         _claim_movement_aliases(connection, statement, source_download, transaction, plan)
         return {**plan, "state": "created", "bank_transaction": transaction.name}
+    except QueryDeadlockError:
+        # MariaDB has already discarded the transaction and its savepoints.
+        raise
     except Exception:
         frappe.db.rollback(save_point=savepoint)
         raise
@@ -1058,15 +1062,30 @@ def _book_exact_match(connection, statement, entry, download_name):
 
 
 def _process_download(connection, record):
+    """Process a confirmed receipt, restarting the transaction on a database conflict."""
+    initial_booked = int(record.booked_count or 0)
+    for attempt in range(3):
+        try:
+            review = _process_confirmed_download(connection, record)
+        except QueryDeadlockError:
+            frappe.db.rollback()
+            if attempt == 2:
+                raise
+            record = frappe.get_doc("EBICS Download", record.name)
+        else:
+            return {"booked": int(record.booked_count or 0) - initial_booked, "review": review}
+
+
+def _process_confirmed_download(connection, record):
     if record.ack_state != "Confirmed":
         raise BankFileError("Bank receipt must be confirmed before automatic booking")
     payload = _verify_receipt(record)
     new_hashes = _new_hashes_for_record(record, payload)
     if not new_hashes:
         record.db_set("processing_state", "Duplicate", commit=True)
-        return {"booked": 0, "review": 0}
+        return 0
     preview = _preview(payload, connection, included_hashes=new_hashes, profile=record.profile)
-    booked = review = 0
+    review = 0
     mirrored = set()
     movement_map = []
     for statement in preview["statements"]:
@@ -1074,6 +1093,8 @@ def _process_download(connection, record):
             movement_review = False
             try:
                 movement = _mirror_bank_entry(connection, statement, entry, record.name, apply=True)
+            except QueryDeadlockError:
+                raise
             except Exception as error:
                 movement = {"state": "review", "reason": type(error).__name__}
                 frappe.log_error(title="EBICS movement requires review", message=type(error).__name__)
@@ -1096,9 +1117,10 @@ def _process_download(connection, record):
                                         booked_count, update_modified=False)
                     frappe.db.commit()
                     record.booked_count = booked_count
-                    booked += 1
                 elif not movement_review:
                     review += 1
+            except QueryDeadlockError:
+                raise
             except Exception as error:
                 frappe.db.rollback(save_point=savepoint)
                 # An isolated candidate is never allowed to book a difference or
@@ -1112,7 +1134,7 @@ def _process_download(connection, record):
                    "movement_map_json": json.dumps(movement_map, ensure_ascii=False,
                                                    sort_keys=True, separators=(",", ":")),
                    "processing_state": "Review" if review else "Completed"}, commit=True)
-    return {"booked": booked, "review": review}
+    return review
 
 
 def sync_connection(connection_name, debug=False):

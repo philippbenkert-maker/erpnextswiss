@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from threading import Barrier, Event
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 import frappe
@@ -54,14 +55,36 @@ def worker(names, enriched, barrier, plain_committed):
         plan = auto._movement_plan(connection, statement, entry)
         assert plan["state"] == "create", "Both sessions must plan before either applies"
         barrier.wait(timeout=15)
+        conflicts = []
         if enriched:
             assert plain_committed.wait(15), "The first writer did not commit"
             assert not frappe.db.get_value("Bank Transaction", {"bank_account": names.bank_account}, "name")
-        result = auto._apply_movement_plan(connection, statement, entry, names.source, plan)
+            snapshot_isolation = bool(frappe.db.sql("SELECT @@session.innodb_snapshot_isolation")[0][0])
+            outcomes = []
+
+            def apply_attempt(receipt_connection, record):
+                assert record.ack_state == "Confirmed" and record.name == names.source
+                try:
+                    outcomes.append(auto._apply_movement_plan(
+                        receipt_connection, statement, entry, record.name, plan))
+                except frappe.QueryDeadlockError as error:
+                    conflicts.append(error.__cause__.args[0])
+                    raise
+                return 0
+
+            with patch.object(auto, "_process_confirmed_download", apply_attempt):
+                assert auto._process_download(connection, frappe.get_doc("EBICS Download", names.source)) == {
+                    "booked": 0, "review": 0}
+            assert conflicts == ([1020] if snapshot_isolation else [])
+            assert len(outcomes) == 1
+            result = outcomes[0]
+        else:
+            result = auto._apply_movement_plan(connection, statement, entry, names.source, plan)
         frappe.db.commit()
         if not enriched:
             plain_committed.set()
-        return {key: result[key] for key in ("state", "identity", "bank_transaction")}
+        return {**{key: result[key] for key in ("state", "identity", "bank_transaction")},
+                "snapshot_conflicts": conflicts}
     finally:
         frappe.db.rollback()
         frappe.destroy()
@@ -135,6 +158,9 @@ def concurrent_checks():
         assert frappe.db.get_value("Bank Transaction", doc.name, "transaction_id") == entry["reference"]
         try:
             auto._apply_movement_plan(connection, statement, entry, stale.source, plan)
+        except frappe.QueryDeadlockError as error:
+            assert error.__cause__.args[0] == 1020
+            frappe.db.rollback()
         except BankFileError:
             pass
         else:
@@ -144,7 +170,8 @@ def concurrent_checks():
         assert current.get(auto._MOVEMENT_ID_FIELD) == "OTHER-CLAIM"
         assert not current.get(auto._MOVEMENT_FINGERPRINT_FIELD)
         assert accounting_digest() == baseline
-        return {"concurrent_enrichment": "PASS", "repeatable_read_stale_adoption": "PASS"}
+        return {"concurrent_enrichment": "PASS", "repeatable_read_stale_adoption": "PASS",
+                "snapshot_conflicts_retried": results[1]["snapshot_conflicts"]}
     finally:
         frappe.db.rollback()
         for created in names:

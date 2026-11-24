@@ -1090,6 +1090,21 @@ class TestEbicsAutomation(TestCase):
         self.assertEqual(update["mirrored_count"], 1)
         self.assertEqual(json.loads(update["movement_map_json"])[0]["bank_transaction"], "ACC-BTN-1")
 
+    def test_receipt_conflict_reloads_durable_progress_before_retry(self):
+        old = MagicMock(booked_count=2)
+        old.name = "EBICS-1"
+        fresh = MagicMock(booked_count=3)
+        with (patch.object(automation, "_process_confirmed_download",
+                           side_effect=[frappe.QueryDeadlockError(), 2]) as process,
+              patch.object(frappe.db, "rollback") as rollback,
+              patch.object(frappe, "get_doc", return_value=fresh) as reload):
+            result = automation._process_download("connection", old)
+        self.assertEqual(result, {"booked": 1, "review": 2})
+        self.assertEqual([row.args for row in process.call_args_list],
+                         [("connection", old), ("connection", fresh)])
+        rollback.assert_called_once_with()
+        reload.assert_called_once_with("EBICS Download", "EBICS-1")
+
     def test_failed_receipt_progress_write_rolls_back_the_payment(self):
         entry = {"issues": []}
         record = MagicMock(ack_state="Confirmed", new_file_hashes_json='["hash"]',

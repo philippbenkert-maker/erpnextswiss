@@ -25,6 +25,10 @@ class Row(dict):
     __setattr__ = dict.__setitem__
 
 
+class QueryDeadlockError(Exception):
+    pass
+
+
 class BankFileError(Exception):
     pass
 
@@ -128,7 +132,7 @@ def helpers(store):
             selected.append(node)
     env = dict(frappe=store, Decimal=Decimal, InvalidOperation=InvalidOperation,
                ROUND_HALF_UP=ROUND_HALF_UP, sha256=sha256, json=json,
-               BankFileError=BankFileError)
+               BankFileError=BankFileError, QueryDeadlockError=QueryDeadlockError)
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(source), "exec"), env)
     return SimpleNamespace(**env)
 

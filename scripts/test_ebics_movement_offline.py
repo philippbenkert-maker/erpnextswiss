@@ -35,7 +35,8 @@ frappe = MagicMock()
 frappe._dict = identity.Row
 automation.__dict__.update(frappe=frappe, Decimal=Decimal, InvalidOperation=InvalidOperation,
                            ROUND_HALF_UP=ROUND_HALF_UP, date=date, sha256=sha256, json=json,
-                           re=re, BankFileError=identity.BankFileError)
+                           re=re, BankFileError=identity.BankFileError,
+                           QueryDeadlockError=identity.QueryDeadlockError)
 path = ROOT / "erpnextswiss/erpnextswiss/ebics_automation.py"
 tree = ast.parse(path.read_text(encoding="utf-8"))
 tree.body = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.Assign))]
