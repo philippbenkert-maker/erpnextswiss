@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 import json
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 import unittest
 from uuid import uuid4
 
@@ -47,15 +47,20 @@ def native_digest():
         for table in ("Bank Transaction", "Bank Transaction Payments", "EBICS Movement Alias")}
 
 
-def worker(names, enriched, barrier):
+def worker(names, enriched, barrier, plain_committed):
     connect()
     try:
         connection, statement, entry = movement(names, enriched=enriched)
         plan = auto._movement_plan(connection, statement, entry)
         assert plan["state"] == "create", "Both sessions must plan before either applies"
         barrier.wait(timeout=15)
+        if enriched:
+            assert plain_committed.wait(15), "The first writer did not commit"
+            assert not frappe.db.get_value("Bank Transaction", {"bank_account": names.bank_account}, "name")
         result = auto._apply_movement_plan(connection, statement, entry, names.source, plan)
         frappe.db.commit()
+        if not enriched:
+            plain_committed.set()
         return {key: result[key] for key in ("state", "identity", "bank_transaction")}
     finally:
         frappe.db.rollback()
@@ -102,7 +107,9 @@ def concurrent_checks():
         baseline = accounting_digest()
         with ThreadPoolExecutor(max_workers=2) as pool:
             barrier = Barrier(2)
-            futures = [pool.submit(worker, concurrent, enriched, barrier) for enriched in (False, True)]
+            plain_committed = Event()
+            futures = [pool.submit(worker, concurrent, enriched, barrier, plain_committed)
+                       for enriched in (False, True)]
             results = [future.result(timeout=40) for future in futures]
         frappe.db.rollback()  # discard any old snapshot before checking committed workers
         assert sorted(result["state"] for result in results) == ["created", "existing"]

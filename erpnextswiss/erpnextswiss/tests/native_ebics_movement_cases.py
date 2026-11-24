@@ -139,6 +139,14 @@ class TestEbicsMovementNative(unittest.TestCase):
         changed = deepcopy(entry)
         changed["amount"] = "13.34"
         self.assertEqual(auto._movement_plan(connection, statement, changed)["state"], "review")
+        alias = frappe.get_doc("EBICS Movement Alias", frappe.db.get_value(
+            "EBICS Movement Alias", {"bank_account": self.names.bank_account}, "name"))
+        invalid = frappe.get_doc({**alias.as_dict(), "name": None,
+                                  "alias_id": "EBICS-MOV-" + "0" * 64,
+                                  "bank_transaction": "MISSING-SYNTHETIC-MOVEMENT"})
+        with self.assertRaises(frappe.LinkValidationError):
+            invalid.insert(ignore_permissions=True)
+        self.assertFalse(frappe.db.exists("EBICS Movement Alias", {"alias_id": invalid.alias_id}))
         frappe.set_user("Guest")
         with self.assertRaises(frappe.PermissionError):
             auto.mirror_historical_bank_movements("NO-PROVIDER-CALL")

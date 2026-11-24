@@ -7,6 +7,19 @@ from frappe.model.document import Document
 
 
 class EBICSMovementAlias(Document):
+    def _validate_links(self):
+        if self.bank_transaction:
+            # The account lock can reveal another worker's committed movement
+            # while Frappe's ordinary link query still sees the old snapshot.
+            # Seed that exact native lookup with a fresh locked read.
+            fetched = self.meta.get_fields_to_fetch("bank_transaction")
+            fields = ("name", *(field.fetch_from.rsplit(".", 1)[-1] for field in fetched
+                                  if not field.get("fetch_if_empty") or not self.get(field.fieldname)))
+            frappe.db.value_cache["Bank Transaction"].pop(self.bank_transaction, None)
+            frappe.db.get_value("Bank Transaction", self.bank_transaction, fields, as_dict=True,
+                                for_update=True, cache=True, order_by=None)
+        super()._validate_links()
+
     def validate(self):
         if not self.is_new():
             frappe.throw("An EBICS bank reference claim cannot be changed")
