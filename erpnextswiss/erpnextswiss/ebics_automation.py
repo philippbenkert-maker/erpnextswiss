@@ -1256,8 +1256,34 @@ def reconcile_historical_receipts(connection_name, apply=False):
         lock.release()
 
 
-def _historical_movement_pass(connection, *, apply):
+def _movement_map_key(row):
+    if not isinstance(row, dict):
+        raise BankFileError("Invalid historical movement map row")
+    digest = row.get("file_sha256")
+    position = row.get("statement_index"), row.get("entry_index")
+    if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or any(type(index) is not int or index < 0 for index in position)):
+        raise BankFileError("Invalid historical movement map position")
+    return digest, *position
+
+
+def _scoped_receipt_map(record, movement_map):
+    try:
+        existing = json.loads(record.movement_map_json or "[]")
+    except (TypeError, ValueError) as exc:
+        raise BankFileError("Invalid historical movement map") from exc
+    if not isinstance(existing, list):
+        raise BankFileError("Invalid historical movement map")
+    selected = {_movement_map_key(row) for row in movement_map}
+    if len(selected) != len(movement_map):
+        raise BankFileError("Duplicate position in the selected bank movement map")
+    return [row for row in existing if _movement_map_key(row) not in selected] + movement_map
+
+
+def _historical_movement_pass(connection, *, apply, ledger_account=None):
     planned = {} if not apply else None
+    scoped = ledger_account is not None
+    plan_hash = sha256() if scoped and not apply else None
     totals = {
         "receipts_checked": 0, "entries_checked": 0, "created": 0,
         "adopted": 0, "existing": 0, "review": 0,
@@ -1278,8 +1304,9 @@ def _historical_movement_pass(connection, *, apply):
             hashes = _new_hashes_for_record(record, payload)
             preview = _preview(payload, connection, included_hashes=hashes, profile=record.profile)
             movement_map = []
-            mirrored = set()
             for statement in preview["statements"]:
+                if scoped and statement.get("account") != ledger_account:
+                    continue
                 for entry in statement["entries"]:
                     result = _mirror_bank_entry(connection, statement, entry, record.name,
                                                 apply=apply, planned=planned)
@@ -1296,31 +1323,49 @@ def _historical_movement_pass(connection, *, apply):
                         totals["review"] += 1
                         reason = result.get("reason") or "unknown"
                         reasons[reason] = reasons.get(reason, 0) + 1
-                    if result.get("bank_transaction"):
-                        mirrored.add(result["bank_transaction"])
-            if apply:
+            if scoped and movement_map:
+                persisted = _scoped_receipt_map(record, movement_map)
+                if plan_hash is not None:
+                    row = [record.name, record.payload_sha256, record.movement_map_json, movement_map]
+                    plan_hash.update(json.dumps(row, ensure_ascii=False, sort_keys=True,
+                                                separators=(",", ":")).encode() + b"\n")
+            else:
+                persisted = movement_map
+            if apply and (not scoped or movement_map):
+                mirrored = {row["bank_transaction"] for row in persisted if row.get("bank_transaction")}
                 record.db_set({
                     "mirrored_count": len(mirrored),
-                    "movement_map_json": json.dumps(movement_map, ensure_ascii=False,
+                    "movement_map_json": json.dumps(persisted, ensure_ascii=False,
                                                     sort_keys=True, separators=(",", ":")),
                 }, commit=False)
             totals["receipts_checked"] += 1
         if len(names) < 100:
             totals["review_reasons"] = reasons
+            if plan_hash is not None:
+                totals["plan_sha256"] = plan_hash.hexdigest()
             return totals
         offset += len(names)
     raise BankFileError("EBICS archive exceeds safe movement-backfill limit")
 
 
-def mirror_historical_bank_movements(connection_name, apply=False):
+def mirror_historical_bank_movements(connection_name, apply=False, *, bank_account=None,
+                                     expected_plan_sha256=None):
     """Plan first, then mirror verified archives without touching GL or payments.
 
     The default is a bounded read-only dry run. An apply run is refused while
     any entry lacks a safe bank identity, conflicts with a changed bank ID or
-    resembles an unadopted historical native Bank Transaction.
+    resembles an unadopted historical native Bank Transaction. Scoped writes
+    also require the plan digest returned by a dry run for the same Bank Account.
     """
     if type(apply) is not bool:
         raise ValueError("apply must be a boolean")
+    if bank_account is not None and (not isinstance(bank_account, str) or not bank_account):
+        raise ValueError("bank_account must be a Bank Account name")
+    if (apply and bank_account is not None and
+            (not isinstance(expected_plan_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_plan_sha256))):
+        raise ValueError("A scoped apply requires the exact dry-run digest")
+    if expected_plan_sha256 is not None and (not apply or bank_account is None):
+        raise ValueError("The dry-run digest is only used for scoped apply")
     frappe.only_for(("Accounts Manager", "System Manager"))
     lock = frappe.cache().lock("ebics-download:" + connection_name, timeout=900,
                                blocking_timeout=0)
@@ -1329,15 +1374,27 @@ def mirror_historical_bank_movements(connection_name, apply=False):
     try:
         connection = frappe.get_doc("ebics Connection", connection_name)
         connection.check_permission("read")
-        _accounts(connection)
-        plan = _historical_movement_pass(connection, apply=False)
+        linked_accounts = _accounts(connection)
+        scope = {}
+        if bank_account is not None:
+            selected = frappe.get_doc("Bank Account", bank_account)
+            selected.check_permission("read")
+            if (selected.company != connection.company or not selected.is_company_account or selected.disabled
+                    or selected.account not in linked_accounts
+                    or _statement_bank_account(connection, {"account": selected.account}) != selected.name):
+                raise BankFileError("Bank Account does not match the EBICS connection")
+            scope["ledger_account"] = selected.account
+        plan = _historical_movement_pass(connection, apply=False, **scope)
         if not apply:
             return {"status": "dry_run", **plan}
         if plan["review"]:
             return {"status": "review_required", **plan}
+        if scope and plan["plan_sha256"] != expected_plan_sha256:
+            return {"status": "plan_changed", **plan}
         try:
-            result = _historical_movement_pass(connection, apply=True)
-            if result["review"]:
+            result = _historical_movement_pass(connection, apply=True, **scope)
+            counts = ("receipts_checked", "entries_checked", "created", "adopted", "existing")
+            if result["review"] or (scope and any(plan[key] != result[key] for key in counts)):
                 raise BankFileError("The EBICS movement plan changed during backfill")
             frappe.db.commit()
             return {"status": "applied", **result}

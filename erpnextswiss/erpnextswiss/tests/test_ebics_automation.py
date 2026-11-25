@@ -907,6 +907,73 @@ class TestEbicsAutomation(TestCase):
         self.assertEqual(run.call_count, 1)
         commit.assert_not_called()
 
+    def test_scoped_historical_movements_preserve_other_account_rows(self):
+        connection = frappe._dict(name='AKB')
+        record = MagicMock()
+        record.name = 'DOWNLOAD-1'
+        record.profile = automation.PROFILE
+        record.payload_sha256 = 'b' * 64
+        previous = {
+            'file_sha256': 'a' * 64, 'statement_index': 1, 'entry_index': 1,
+            'bank_transaction': 'CHF-EXISTING',
+        }
+        record.movement_map_json = json.dumps([previous])
+        statements = [
+            {'account': 'CHF', 'file_sha256': 'a' * 64, 'statement_index': 1,
+             'entries': [{'index': 1}]},
+            {'account': 'EUR', 'file_sha256': 'a' * 64, 'statement_index': 2,
+             'entries': [{'index': 1}]},
+        ]
+        result = {'state': 'would_create', 'entry_sha256': 'c' * 64, 'identity': 'id'}
+        with (patch.object(automation.frappe, 'get_all', return_value=[record.name]),
+              patch.object(automation.frappe, 'get_doc', return_value=record),
+              patch.object(automation, '_verify_receipt'),
+              patch.object(automation, '_new_hashes_for_record'),
+              patch.object(automation, '_preview', return_value={'statements': statements}),
+              patch.object(automation, '_mirror_bank_entry', return_value=result) as mirror):
+            dry = automation._historical_movement_pass(connection, apply=False, ledger_account='EUR')
+            self.assertEqual(dry['entries_checked'], 1)
+            self.assertEqual(dry['created'], 1)
+            self.assertRegex(dry['plan_sha256'], r'^[0-9a-f]{64}$')
+            self.assertEqual(mirror.call_args.args[1]['account'], 'EUR')
+            mirror.assert_called_once()
+            record.db_set.assert_not_called()
+            mirror.return_value = {**result, 'state': 'created', 'bank_transaction': 'EUR-NEW'}
+            applied = automation._historical_movement_pass(connection, apply=True, ledger_account='EUR')
+        self.assertEqual(applied['created'], 1)
+        updates = record.db_set.call_args.args[0]
+        self.assertEqual(updates['mirrored_count'], 2)
+        history = json.loads(updates['movement_map_json'])
+        self.assertEqual(history[0], previous)
+        self.assertEqual(history[1]['bank_transaction'], 'EUR-NEW')
+
+    def test_scoped_historical_apply_requires_the_same_plan(self):
+        connection = MagicMock()
+        connection.name = 'AKB'
+        connection.company = 'Test Company'
+        account = MagicMock()
+        account.name = 'EUR-BANK'
+        account.company = connection.company
+        account.account = 'EUR-LEDGER'
+        account.is_company_account = 1
+        account.disabled = 0
+        digest = 'a' * 64
+        dry = {'plan_sha256': digest, 'review': 0}
+        with (patch.object(automation.frappe, 'only_for'),
+              patch.object(automation.frappe, 'cache'),
+              patch.object(automation.frappe, 'get_doc', side_effect=[connection, account]),
+              patch.object(automation, '_accounts', return_value=[account.account]),
+              patch.object(automation, '_statement_bank_account', return_value=account.name),
+              patch.object(automation, '_historical_movement_pass', return_value=dry) as run,
+              patch.object(automation.frappe.db, 'commit') as commit):
+            with self.assertRaises(ValueError):
+                automation.mirror_historical_bank_movements('AKB', apply=True, bank_account=account.name)
+            result = automation.mirror_historical_bank_movements(
+                'AKB', apply=True, bank_account=account.name, expected_plan_sha256='b' * 64)
+            self.assertEqual(result['status'], 'plan_changed')
+            run.assert_called_once_with(connection, apply=False, ledger_account=account.account)
+            commit.assert_not_called()
+
     def test_only_posted_exact_bank_payment_resolves_suppressed_candidate(self):
         statement, entry = self._candidate()
         statement['account'] = 'BANK'

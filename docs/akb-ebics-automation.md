@@ -92,7 +92,11 @@ eine Dublette zu erzeugen. Die Funktion
 reiner Dry-Run. `apply=True` wird vollständig verweigert, solange der Plan auch
 nur einen ungeklärten Eintrag enthält. Der anschliessende Apply-Lauf prüft alle
 Identitäten erneut und schreibt atomar; bei Fehler wird der gesamte Backfill
-zurückgerollt. Hauptbuch, Zahlungen und Bankprovider bleiben unverändert.
+zurückgerollt. Hauptbuch, Zahlungen und Bankprovider bleiben unverändert. Für die gezielte Übernahme
+übergibt der Betreiber `bank_account` mit dem exakten Firmenbankkonto. Der
+Probelauf liefert `plan_sha256`, den der Schreibschritt für dasselbe Konto als
+`expected_plan_sha256` voraussetzt. Quellpositionen anderer Konten bleiben
+im bestehenden Empfangsnachweis erhalten.
 
 Der Schreibpfad sperrt das Firmenbankkonto unabhängig von der EBICS-Verbindung
 und liest Referenzen und Bewegungen danach mit aktuellen Zeilensperren erneut.

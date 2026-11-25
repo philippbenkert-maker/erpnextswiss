@@ -48,6 +48,8 @@ names = {
     "test_legacy_bank_transaction_is_adopted_only_by_exact_reference",
     "test_native_movement_creation_submits_no_payment_or_gl_allocation",
     "test_historical_movement_backfill_is_dry_run_and_fail_closed",
+    "test_scoped_historical_movements_preserve_other_account_rows",
+    "test_scoped_historical_apply_requires_the_same_plan",
 }
 path = ROOT / "erpnextswiss/erpnextswiss/tests/test_ebics_automation.py"
 tree = ast.parse(path.read_text(encoding="utf-8"))
